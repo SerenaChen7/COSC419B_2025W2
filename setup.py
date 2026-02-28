@@ -18,7 +18,7 @@ def deactivate_conda_env(env_name):
     os.system(f"conda deactivate")
 
 def conda_pyrun(env_name, exec_file, args):
-    os.system(f"conda run -n {env_name} --live-stream python3 \"{exec_file}\" '{json.dumps(dict(vars(args)))}'")
+    os.system(f"conda run -n {env_name} --live-stream python \"{exec_file}\" '{json.dumps(dict(vars(args)))}'")
 
 
 def get_conda_envs():
@@ -124,7 +124,10 @@ def download_models_common(root_dir):
         os.system(f"mkdir {models_folder_path}")
     save_path = os.path.join(rep_path, "ViTPose", "checkpoints", "vitpose-h.pth")
     if not os.path.isfile(save_path):
-        gdown.download(url, save_path)
+        print("DOWNLOADING:", url, "->", save_path)
+        if not os.path.exists(save_path):
+            gdown.download(url, save_path)
+        else:print("FOUND, skipping:", save_path)
 
 def download_models(root_dir, dataset):
     # download and save fine-tuned model

@@ -13,7 +13,7 @@ reid_home = 'reid/'
 
 
 dataset = {'SoccerNet':
-                {'root_dir': './data/SoccerNet',
+                {'root_dir': '../data/SoccerNet/jersey-2023',
                  'working_dir': './out/SoccerNetResults',
                  'test': {
                         'images': 'test/images',
