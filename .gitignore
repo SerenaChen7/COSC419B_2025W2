@@ -12,3 +12,8 @@ __pycache__/
 *.pyc
 
 predictions.json
+*.pth
+*.ckpt
+*.txt
+PKG-INFO
+
