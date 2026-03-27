@@ -1,0 +1,101 @@
+# services:
+#   preprocess:
+#     build:
+#       context: .
+#       dockerfile: DOCKERFILE
+#     volumes:
+#       - ./data:/workspace/data
+#       - ./outputs:/workspace/outputs
+#       - ./src:/workspace/src
+#     working_dir: /workspace
+#     command: python src/preprocess_crops.py
+
+#   train:
+#     build:
+#       context: .
+#       dockerfile: DOCKERFILE
+#     volumes:
+#       - ./data:/workspace/data
+#       - ./outputs:/workspace/outputs
+#       - ./src:/workspace/src
+#     working_dir: /workspace
+#     command: python src/train.py
+
+#   predict:
+#     build:
+    #   context: .
+    #   dockerfile: DOCKERFILE
+#     volumes:
+#       - ./data:/workspace/data
+#       - ./outputs:/workspace/outputs
+#       - ./src:/workspace/src
+#     working_dir: /workspace
+#     command: python src/predict.py
+
+services:
+  # ── Pre-compute torso crops ────────────────────────────────────────────────
+  preprocess:
+    build: 
+        context: .
+        dockerfile: DOCKERFILE
+    image: jersey-recognition:latest
+    volumes:
+      - ./data:/workspace/data
+      - ~/.cache/mediapipe:/root/.cache/mediapipe   # reuse cached model
+    command: >
+      python src/preprocess_crops.py
+        --data-dir data/jersey-2023
+        --split all
+        --workers 
+    # MediaPipe CPU-only; no GPU reservation needed here
+    shm_size: "2gb"
+
+  # ── Training ───────────────────────────────────────────────────────────────
+  train:
+    build:
+        context: .
+        dockerfile: DOCKERFILE
+    image: jersey-recognition:latest
+    volumes:
+      - ./data:/workspace/data
+      - ./outputs:/workspace/outputs
+      - ./src:/workspace/src
+    environment:
+      - OMP_NUM_THREADS=4
+      - MKL_NUM_THREADS=4
+    command: >
+      python src/train.py
+        --data-dir data/jersey-2023
+        --crops-dir data/jersey-2023/train/crops
+        --epochs 30
+        --batch-size 64
+        --lr 1e-3
+        --img-size 128
+        --max-per-tracklet 15
+        --freeze-epochs 3
+        --workers 4
+        --output-dir outputs
+    shm_size: "4gb"
+
+  # ── Inference ──────────────────────────────────────────────────────────────
+  predict:
+    build:
+        context: .
+        dockerfile: DOCKERFILE
+    image: jersey-recognition:latest
+    volumes:
+      - ./data:/workspace/data
+      - ./outputs:/workspace/outputs
+      - ./src:/workspace/src
+    command: >
+      python src/predict.py
+        --data-dir data/jersey-2023
+        --crops-dir data/jersey-2023/test/crops
+        --checkpoint outputs/best_model.pth
+        --output outputs/predictions.json
+        --img-size 128
+        --batch-size 256
+        --max-images 50
+        --tta
+        --gt data/jersey-2023/test/test_gt.json
+    shm_size: "4gb"

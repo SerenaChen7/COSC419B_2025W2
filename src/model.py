@@ -10,18 +10,33 @@ from dataset import NUM_CLASSES
 
 def build_model(num_classes: int = NUM_CLASSES, pretrained: bool = True) -> nn.Module:
     """
-    ResNet-18 with a custom classification head.
-    The final FC layer is replaced with a linear layer for `num_classes` outputs.
+    ResNet-18 with a two-layer classification head.
     """
     weights = models.ResNet18_Weights.DEFAULT if pretrained else None
     model = models.resnet18(weights=weights)
 
-    in_features = model.fc.in_features
+    in_features = model.fc.in_features  # 512
     model.fc = nn.Sequential(
-        nn.Dropout(p=0.3),
-        nn.Linear(in_features, num_classes),
+        nn.Linear(in_features, 256),
+        nn.BatchNorm1d(256),
+        nn.ReLU(inplace=True),
+        nn.Dropout(p=0.4),
+        nn.Linear(256, num_classes),
     )
     return model
+
+
+def freeze_backbone(model: nn.Module):
+    """Freeze all layers except the classification head."""
+    for name, param in model.named_parameters():
+        if not name.startswith('fc.'):
+            param.requires_grad = False
+
+
+def unfreeze_backbone(model: nn.Module):
+    """Unfreeze all parameters."""
+    for param in model.parameters():
+        param.requires_grad = True
 
 
 def load_checkpoint(checkpoint_path: str, device: torch.device) -> nn.Module:

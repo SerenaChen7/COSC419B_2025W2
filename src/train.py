@@ -12,6 +12,7 @@ import sys
 import json
 import argparse
 import random
+from collections import Counter
 from pathlib import Path
 
 import torch
@@ -24,9 +25,9 @@ from tqdm import tqdm
 sys.path.insert(0, str(Path(__file__).parent))
 
 from dataset import (
-    JerseyTrainDataset, get_train_transforms, get_val_transforms, class_to_jersey
+    JerseyTrainDataset, NUM_CLASSES, get_train_transforms, get_val_transforms, class_to_jersey
 )
-from model import build_model
+from model import build_model, freeze_backbone, unfreeze_backbone
 
 
 def parse_args():
@@ -42,6 +43,8 @@ def parse_args():
                    help='Fraction of tracklets reserved for validation')
     p.add_argument('--output-dir', default='outputs', help='Where to save checkpoints')
     p.add_argument('--workers', type=int, default=4)
+    p.add_argument('--freeze-epochs', type=int, default=5,
+                   help='Epochs to train only the head before unfreezing the backbone')
     p.add_argument('--crops-dir', default=None,
                    help='Path to pre-computed torso crops (output of preprocess_crops.py). '
                         'If set, images are loaded from here instead of images/.')
@@ -51,6 +54,7 @@ def parse_args():
 def accuracy(logits: torch.Tensor, targets: torch.Tensor) -> float:
     preds = logits.argmax(dim=1)
     return (preds == targets).float().mean().item()
+
 
 
 def train_epoch(model, loader, criterion, optimizer, device, scaler=None):
@@ -141,17 +145,34 @@ def main():
     print(f'Train: {len(train_ds.tracklets)} tracklets, {len(train_ds)} images')
     print(f'Val:   {len(val_ds.tracklets)} tracklets, {len(val_ds)} images')
 
+    pin = device.type == 'cuda'
     train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True,
-                              num_workers=args.workers, pin_memory=True)
+                              num_workers=args.workers, pin_memory=pin)
     val_loader = DataLoader(val_ds, batch_size=args.batch_size, shuffle=False,
-                            num_workers=args.workers, pin_memory=True)
+                            num_workers=args.workers, pin_memory=pin)
 
     # --- Model ---
     model = build_model(pretrained=True).to(device)
 
-    # Label smoothing helps with the 100-class setup where not all are seen
-    criterion = nn.CrossEntropyLoss(label_smoothing=0.1)
-    optimizer = optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
+    # Freeze backbone for the first `freeze_epochs` epochs so the randomly
+    # initialised head stabilises before disturbing pretrained weights.
+    freeze_backbone(model)
+
+    # Class-weighted loss: use sqrt inverse frequency so rare jersey numbers get
+    # more signal without aggressively down-weighting illegible (class 0),
+    # which is common and must not be suppressed.
+    label_counts = Counter(label for _, label in train_ds.samples)
+    total_samples = sum(label_counts.values())
+    class_weights = torch.ones(NUM_CLASSES)
+    for cls, count in label_counts.items():
+        class_weights[cls] = (total_samples / (NUM_CLASSES * count)) ** 0.5
+    class_weights = class_weights.to(device)
+
+    criterion = nn.CrossEntropyLoss(weight=class_weights, label_smoothing=0.1)
+    optimizer = optim.AdamW(
+        filter(lambda p: p.requires_grad, model.parameters()),
+        lr=args.lr, weight_decay=1e-4,
+    )
     scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs, eta_min=1e-5)
 
     # Mixed precision for CUDA
@@ -161,10 +182,23 @@ def main():
     history = []
 
     for epoch in range(1, args.epochs + 1):
+        # Phase 2: unfreeze backbone with a lower LR after freeze_epochs
+        if epoch == args.freeze_epochs + 1:
+            unfreeze_backbone(model)
+            optimizer = optim.AdamW([
+                {'params': model.fc.parameters(), 'lr': args.lr},
+                {'params': [p for n, p in model.named_parameters()
+                            if not n.startswith('fc.')], 'lr': args.lr * 0.1},
+            ], weight_decay=1e-4)
+            scheduler = optim.lr_scheduler.CosineAnnealingLR(
+                optimizer, T_max=args.epochs - args.freeze_epochs, eta_min=1e-5,
+            )
+            print(f'  -> Unfreezing backbone at epoch {epoch} (backbone LR={args.lr * 0.1:.2e})')
+
         # Resample training images from tracklets each epoch
         train_ds.resample()
         train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True,
-                                  num_workers=args.workers, pin_memory=True)
+                                  num_workers=args.workers, pin_memory=pin)
 
         train_loss, train_acc = train_epoch(model, train_loader, criterion, optimizer, device, scaler)
         val_loss, val_acc = val_epoch(model, val_loader, criterion, device)
