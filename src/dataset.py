@@ -205,27 +205,32 @@ def class_to_jersey(class_idx: int) -> int:
     return -1 if class_idx == 0 else class_idx
 
 
-def get_train_transforms(img_size: int = 224):
+def get_train_transforms(img_size: int = 128):
     """
-    Training augmentations.
-    NOTE: hue jitter removed -- causes uint8 overflow in older torchvision
-    and is counterproductive for jersey colours anyway.
+    Training augmentations tuned for digit readability.
+
+    Design rationale:
+    - GaussianBlur removed: at ≤128px, even a 3-pixel kernel smears digits
+      enough to destroy the label signal — the model cannot read the number.
+    - RandomPerspective kept but reduced: mild distortion helps generalise
+      to tilted/partial jerseys without warping digits beyond recognition.
+    - RandomErasing kept but weakened: large erasure at low resolution
+      can cover the entire jersey number (≈300px at 128×128).
+    - ColorJitter and RandomAffine are safe — they don't destroy digit shape.
     """
     return T.Compose([
         T.Resize((img_size, img_size)),
-        T.RandomHorizontalFlip(),
         T.ColorJitter(brightness=0.4, contrast=0.4, saturation=0.3),
-        T.RandomAffine(degrees=12, translate=(0.1, 0.1), scale=(0.80, 1.20)),
-        T.RandomPerspective(distortion_scale=0.2, p=0.3),
-        T.GaussianBlur(kernel_size=3, sigma=(0.1, 1.0)),
+        T.RandomAffine(degrees=10, translate=(0.08, 0.08), scale=(0.85, 1.15)),
+        T.RandomPerspective(distortion_scale=0.1, p=0.2),
         T.ToTensor(),
         T.Normalize(mean=[0.485, 0.456, 0.406],
                     std=[0.229, 0.224, 0.225]),
-        T.RandomErasing(p=0.2, scale=(0.02, 0.10)),
+        T.RandomErasing(p=0.1, scale=(0.01, 0.05)),
     ])
 
 
-def get_val_transforms(img_size: int = 224):
+def get_val_transforms(img_size: int = 128):
     return T.Compose([
         T.Resize((img_size, img_size)),
         T.ToTensor(),
