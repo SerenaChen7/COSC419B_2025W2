@@ -1,57 +1,55 @@
-"""
-Evaluate predictions against ground truth.
-
-Usage:
-    python src/evaluate.py --pred outputs/predictions.json \
-                           --gt data/jersey-2023/test/test_gt.json
-"""
 import json
 import argparse
+import sys
 
-
-def parse_args():
-    p = argparse.ArgumentParser()
-    p.add_argument('--pred', required=True, help='Path to predictions JSON')
-    p.add_argument('--gt', required=True, help='Path to ground truth JSON')
-    return p.parse_args()
-
-
-def main():
-    args = parse_args()
-
-    with open(args.pred) as f:
-        predictions = json.load(f)
-    with open(args.gt) as f:
-        gt = json.load(f)
-
-    total = correct = 0
-    legible_total = legible_correct = 0
-    illegible_total = illegible_correct = 0
-
-    for tid, gt_num in gt.items():
-        if tid not in predictions:
-            continue
-        pred_num = predictions[tid]
+def evaluate(prediction_path, ground_truth_path):
+    # 1. Load Ground Truth
+    try:
+        with open(ground_truth_path, 'r') as f:
+            gt_data = json.load(f)
+    except FileNotFoundError:
+        print(f"Error: Ground truth file not found at {ground_truth_path}")
+        sys.exit(1)
+    # 2. Load Student Predictions
+    try:
+        with open(prediction_path, 'r') as f:
+            pred_data = json.load(f)
+    except FileNotFoundError:
+        print(f"Error: Prediction file not found at {prediction_path}")
+        sys.exit(1)
+    
+    correct = 0
+    total = 0
+    missing = 0
+    
+    # 3. Compare
+    for uuid, gt_number in gt_data.items():
         total += 1
-        correct += pred_num == gt_num
-
-        if gt_num == -1:
-            illegible_total += 1
-            illegible_correct += pred_num == -1
+        # Check if the student made a prediction for this UUID
+        if uuid in pred_data:
+            pred_number = pred_data[uuid]
+            # Ensure we compare integers (handle potential string inputs)
+            try:
+                if int(pred_number) == int(gt_number):
+                    correct += 1
+            except ValueError:
+                # If prediction is not a valid number, it counts as incorrect
+                pass
         else:
-            legible_total += 1
-            legible_correct += pred_num == gt_num
+            missing += 1
+    
+    # 4. Results
+    accuracy = correct / total if total > 0 else 0
+    print("-" * 30)
+    print("EVALUATION RESULTS")
+    print("-" * 30)
+    print(f"Total Samples (GT): {total}")
+    print(f"Predictions Provided: {total - missing}")
+    print(f"Correct Predictions: {correct}")
+    print(f"Missing Predictions: {missing}")
+    print("-" * 30)
+    print(f"FINAL ACCURACY: {accuracy:.2%}")
+    print("-" * 30)
 
-    print('=== Evaluation ===')
-    print(f'Overall accuracy:    {correct}/{total} = {100*correct/total:.1f}%')
-    if legible_total:
-        print(f'Legible accuracy:    {legible_correct}/{legible_total} = {100*legible_correct/legible_total:.1f}%')
-    if illegible_total:
-        print(f'Illegible accuracy:  {illegible_correct}/{illegible_total} = {100*illegible_correct/illegible_total:.1f}%')
-    print()
-    print(f'Predicted -1 (illegible): {sum(1 for v in predictions.values() if v == -1)} / {len(predictions)}')
-    print(f'GT -1 (illegible):        {sum(1 for v in gt.values() if v == -1)} / {len(gt)}')
-
-
-if __name__ == '__main__':
-    main()
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Evaluate Jersey Number Recognition")

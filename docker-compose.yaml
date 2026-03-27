@@ -74,3 +74,20 @@ services:
         --tta
         --gt data/jersey-2023/test/test_gt.json
     shm_size: "2gb"
+
+  # ── Evaluation ─────────────────────────────────────────────────────────────
+  evaluate:
+    build:
+      context: .
+      dockerfile: DOCKERFILE
+    image: jersey-recognition:latest
+    volumes:
+      - ./data:/workspace/data
+      - ./outputs:/workspace/outputs
+      - ./src:/workspace/src
+    environment:
+      - PYTHONUNBUFFERED=1
+    command: >
+      python src/run_evaluate.py
+        --predictions outputs/predictions.json
+        --ground-truth data/jersey-2023/test/test_gt.json
