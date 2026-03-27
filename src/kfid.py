@@ -1,31 +1,23 @@
 """
 Keyframe Identification (KfId) module.
 
-Implements the four-stage pipeline from Balaji et al. (arXiv:2309.06285),
-with the JNL stage replaced by the pre-trained legibility classifier from
-Koshkina & Elder (already available in models/).
-
-Stages:
-  1. JNL  — legibility classifier (ResNet-34 + sigmoid) scores each frame;
-             frames below the threshold are discarded.
-             Box = preset torso RoI (w/4, h/5) -> (3w/4, h/2) for kept frames.
-  2. RoI  — baked into stage 1 (preset RoI is the detection box).
-  3. LHC  — merges nearby detections with similar hue within a frame.
-             No-op when each frame has exactly one detection box.
-  4. GHC  — K-means on hue histograms of RoI crops across the tracklet;
-             keeps frames belonging to the dominant cluster (target player).
+Implements the four-stage pipeline from Balaji et al. (arXiv:2309.06285):
+  1. JNL  — EasyOCR text detector finds digit regions per frame
+             (closest open-source equivalent to the fine-tuned YOLOv5 in the paper)
+  2. RoI  — custom I* intersection metric filters detections outside the torso region
+  3. LHC  — merges nearby digit boxes with similar hue into one jersey-number box
+  4. GHC  — K-means on hue histograms across the tracklet isolates the target player
 
 Output of filter_tracklet():
     list of {'path': str, 'box': (x1,y1,x2,y2)}
-    Ready to pass to TorsoCropper, then to PARSeq.
+    Ready to pass to TorsoCropper then PARSeq.
+
+Install:
+    pip install easyocr
 """
 
 import numpy as np
 import cv2
-import torch
-import torch.nn as nn
-import torchvision.models as tv_models
-import torchvision.transforms as T
 from pathlib import Path
 from PIL import Image
 from sklearn.cluster import KMeans
@@ -36,13 +28,6 @@ from sklearn.cluster import KMeans
 
 _EPS = 1e-7
 
-_LEGIBILITY_TRANSFORM = T.Compose([
-    T.Resize((224, 224)),
-    T.ToTensor(),
-    T.Normalize(mean=[0.485, 0.456, 0.406],
-                std=[0.229, 0.224, 0.225]),
-])
-
 
 # ---------------------------------------------------------------------------
 # Geometry helpers
@@ -51,6 +36,21 @@ _LEGIBILITY_TRANSFORM = T.Compose([
 def _roi_for_image(w: int, h: int):
     """Preset torso RoI from paper §4.2: top-left (w/4, h/5), bottom-right (3w/4, h/2)."""
     return (w // 4, h // 5, 3 * w // 4, h // 2)
+
+
+def _intersection_star(r1, r2) -> float:
+    """
+    Custom I* metric from eq. (4):
+    I* = A(R1 ∩ R2) / (min(A(R1), A(R2)) + eps)
+    """
+    ix1 = max(r1[0], r2[0])
+    iy1 = max(r1[1], r2[1])
+    ix2 = min(r1[2], r2[2])
+    iy2 = min(r1[3], r2[3])
+    inter = max(0, ix2 - ix1) * max(0, iy2 - iy1)
+    area_r1 = max(0, r1[2] - r1[0]) * max(0, r1[3] - r1[1])
+    area_r2 = max(0, r2[2] - r2[0]) * max(0, r2[3] - r2[1])
+    return inter / (min(area_r1, area_r2) + _EPS)
 
 
 def _box_center(box):
@@ -76,12 +76,11 @@ def _merge_boxes(boxes):
 # ---------------------------------------------------------------------------
 
 def _hue_histogram(crop_bgr: np.ndarray, n_bins: int = 36) -> np.ndarray:
-    """Normalized hue histogram from a BGR crop (hue 0-180 in OpenCV)."""
+    """Normalized hue histogram from a BGR crop."""
     if crop_bgr.size == 0:
         return np.zeros(n_bins, dtype=np.float32)
     hsv = cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2HSV)
-    hue = hsv[:, :, 0]
-    hist, _ = np.histogram(hue, bins=n_bins, range=(0, 180))
+    hist, _ = np.histogram(hsv[:, :, 0], bins=n_bins, range=(0, 180))
     hist = hist.astype(np.float32)
     total = hist.sum()
     if total > 0:
@@ -94,66 +93,73 @@ def _hist_correlation(h1: np.ndarray, h2: np.ndarray) -> float:
 
 
 # ---------------------------------------------------------------------------
-# Stage 1: JNL via Legibility Classifier
+# Stage 1: Jersey Number Localization (JNL) via EasyOCR
 # ---------------------------------------------------------------------------
 
-class _LegibilityJNL:
+class _EasyOCRJNL:
     """
-    Scores each frame with the pre-trained ResNet-34 legibility classifier.
-    Architecture matches LegibilityClassifier34 from the original codebase:
-        ResNet-34 -> Linear(512, 1) -> Sigmoid
-    Frames with score >= threshold are kept; their box = preset torso RoI.
+    Uses EasyOCR's text detector to find digit/text regions per frame.
+    This is the closest open-source equivalent to the fine-tuned YOLOv5
+    digit detector used in the original Balaji et al. paper.
+
+    Returns bounding boxes (x1, y1, x2, y2) for each detected text region.
+    Frames with no detections are discarded before RoI filtering.
     """
 
-    def __init__(self, model_path: str, threshold: float = 0.5,
-                 device: str = 'cpu'):
-        self.threshold = threshold
-        self.device = torch.device(device)
-        self._model = self._load(model_path)
+    def __init__(self, conf: float = 0.2, device: str = 'cpu'):
+        try:
+            import easyocr
+        except ImportError:
+            raise ImportError(
+                "EasyOCR not installed. Run: pip install easyocr"
+            )
+        self.conf = conf
+        gpu = device != 'cpu'
+        # digits_only=True restricts to numeric characters — ideal for jersey numbers
+        self._reader = easyocr.Reader(['en'], gpu=gpu, verbose=False)
 
-    def _load(self, model_path: str) -> nn.Module:
-        model = tv_models.resnet34(weights=None)
-        model.fc = nn.Linear(model.fc.in_features, 1)
-
-        state = torch.load(model_path, map_location=self.device)
-        if isinstance(state, dict) and 'model_state_dict' in state:
-            state = state['model_state_dict']
-        model.load_state_dict(state)
-        model.to(self.device)
-        model.eval()
-        return model
-
-    @torch.no_grad()
-    def filter_frames(self, image_paths: list, batch_size: int = 16) -> list:
+    def detect(self, image_bgr: np.ndarray) -> list:
         """
-        Score all frames in a tracklet and return kept (path, box) pairs.
-        Box is the preset torso RoI for each kept image.
+        Run EasyOCR detection on one BGR frame.
+        Returns list of (x1, y1, x2, y2) integer bounding boxes.
         """
-        kept = []
-        for i in range(0, len(image_paths), batch_size):
-            batch_paths = image_paths[i:i + batch_size]
-            pil_imgs, valid_paths = [], []
-            for p in batch_paths:
-                try:
-                    img = Image.open(str(p)).convert('RGB')
-                    pil_imgs.append(img)
-                    valid_paths.append(p)
-                except (OSError, FileNotFoundError):
-                    continue
+        rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
 
-            if not pil_imgs:
-                continue
+        # detect() returns (horizontal_list, free_list)
+        # horizontal_list entries: [x_min, x_max, y_min, y_max]
+        results = self._reader.detect(
+            rgb,
+            min_size=2,
+            text_threshold=self.conf,
+            low_text=0.3,
+            link_threshold=0.4,
+        )
 
-            tensors = torch.stack([_LEGIBILITY_TRANSFORM(img) for img in pil_imgs])
-            tensors = tensors.to(self.device)
-            scores = torch.sigmoid(self._model(tensors)).squeeze(1).cpu().tolist()
+        boxes = []
+        if not results or not results[0]:
+            return boxes
 
-            for path, img, score in zip(valid_paths, pil_imgs, scores):
-                if score >= self.threshold:
-                    w, h = img.size
-                    kept.append((str(path), _roi_for_image(w, h)))
+        for bbox in results[0]:
+            # EasyOCR horizontal format: [x_min, x_max, y_min, y_max]
+            x1, x2, y1, y2 = int(bbox[0]), int(bbox[1]), int(bbox[2]), int(bbox[3])
+            if x2 > x1 and y2 > y1:
+                boxes.append((x1, y1, x2, y2))
 
-        return kept
+        return boxes
+
+
+# ---------------------------------------------------------------------------
+# Stage 2: RoI-based Filtering
+# ---------------------------------------------------------------------------
+
+def _roi_filter(boxes: list, image_w: int, image_h: int,
+                threshold: float = 0.3) -> list:
+    """
+    Keep only detections whose I* overlap with the preset torso RoI
+    exceeds the threshold.
+    """
+    roi = _roi_for_image(image_w, image_h)
+    return [box for box in boxes if _intersection_star(roi, box) >= threshold]
 
 
 # ---------------------------------------------------------------------------
@@ -164,14 +170,15 @@ def _lhc_merge(boxes: list, image_bgr: np.ndarray,
                corr_thresh: float = 0.7,
                dist_thresh: float = 0.35) -> list:
     """
-    Merge nearby detections with similar hue into one holistic box.
-    With the legibility JNL (one box per frame) this is a no-op.
+    Merge digit detections within one frame that are spatially close
+    and share similar hue distributions into a single holistic jersey box.
     """
     if len(boxes) <= 1:
         return boxes
 
     h, w = image_bgr.shape[:2]
     pixel_dist = dist_thresh * w
+
     histograms = []
     for box in boxes:
         x1, y1, x2, y2 = box
@@ -181,6 +188,7 @@ def _lhc_merge(boxes: list, image_bgr: np.ndarray,
     n = len(boxes)
     merged = [False] * n
     groups = []
+
     for i in range(n):
         if merged[i]:
             continue
@@ -205,10 +213,10 @@ def _lhc_merge(boxes: list, image_bgr: np.ndarray,
 def _ghc_filter(frame_detections: list, n_bins: int = 36,
                 n_clusters: int = 2) -> list:
     """
-    K-means on hue histograms across all frames.
+    K-means on hue histograms across all frames in a tracklet.
     Keeps frames from the dominant cluster (target player's jersey colour).
 
-    frame_detections: list of (image_bgr, [box])
+    frame_detections: list of (image_bgr, [box, ...])
     Returns: list of (frame_idx, box)
     """
     records = []
@@ -244,13 +252,14 @@ def _ghc_filter(frame_detections: list, n_bins: int = 36,
 class KfId:
     """
     Keyframe Identification module (Balaji et al., arXiv:2309.06285).
+    JNL stage uses EasyOCR as the digit detector.
 
     Parameters
     ----------
-    legibility_model : str
-        Path to legibility_resnet34_soccer_*.pth checkpoint.
-    legibility_threshold : float
-        Min sigmoid score to keep a frame (default 0.5).
+    jnl_conf : float
+        EasyOCR detection confidence threshold (default 0.2).
+    roi_thresh : float
+        Minimum I* score for RoI filtering (default 0.3).
     lhc_corr_thresh : float
         Hue histogram correlation for LHC merging (default 0.7).
     lhc_dist_thresh : float
@@ -265,19 +274,16 @@ class KfId:
 
     def __init__(
         self,
-        legibility_model: str = 'models/legibility_resnet34_soccer_20240215.pth',
-        legibility_threshold: float = 0.5,
+        jnl_conf: float = 0.2,
+        roi_thresh: float = 0.3,
         lhc_corr_thresh: float = 0.7,
         lhc_dist_thresh: float = 0.35,
         ghc_n_clusters: int = 2,
         n_bins: int = 36,
         device: str = 'cpu',
     ):
-        self._jnl = _LegibilityJNL(
-            model_path=legibility_model,
-            threshold=legibility_threshold,
-            device=device,
-        )
+        self._jnl = _EasyOCRJNL(conf=jnl_conf, device=device)
+        self.roi_thresh = roi_thresh
         self.lhc_corr_thresh = lhc_corr_thresh
         self.lhc_dist_thresh = lhc_dist_thresh
         self.ghc_n_clusters = ghc_n_clusters
@@ -295,28 +301,38 @@ class KfId:
         -------
         list of dict:
             'path' : str            — image file path
-            'box'  : (x1,y1,x2,y2) — torso RoI box on the original image
-        Empty list = no keyframes survived all stages.
+            'box'  : (x1,y1,x2,y2) — detected jersey-number region
+        Empty list = no keyframes survived all four stages.
         """
-        # Stage 1: legibility filter
-        kept = self._jnl.filter_frames(image_paths)
-        if not kept:
-            return []
-
-        # Stages 3 + 4: LHC then GHC on surviving frames
         frame_detections = []
-        for path_str, box in kept:
-            img_bgr = cv2.imread(path_str)
+
+        for path in image_paths:
+            img_bgr = cv2.imread(str(path))
             if img_bgr is None:
                 frame_detections.append((None, []))
                 continue
-            lhc_boxes = _lhc_merge([box], img_bgr,
+
+            h, w = img_bgr.shape[:2]
+
+            # Stage 1: JNL — detect text/digit regions
+            raw_boxes = self._jnl.detect(img_bgr)
+
+            # Stage 2: RoI — keep only boxes overlapping the torso region
+            roi_boxes = _roi_filter(raw_boxes, w, h, threshold=self.roi_thresh)
+
+            # Stage 3: LHC — merge nearby same-hue digit boxes
+            lhc_boxes = _lhc_merge(roi_boxes, img_bgr,
                                    corr_thresh=self.lhc_corr_thresh,
                                    dist_thresh=self.lhc_dist_thresh)
+
             frame_detections.append((img_bgr, lhc_boxes))
 
+        # Stage 4: GHC — keep frames from the dominant jersey-colour cluster
         surviving = _ghc_filter(frame_detections,
                                 n_bins=self.n_bins,
                                 n_clusters=self.ghc_n_clusters)
 
-        return [{'path': kept[fi][0], 'box': box} for fi, box in surviving]
+        return [
+            {'path': str(image_paths[fi]), 'box': box}
+            for fi, box in surviving
+        ]

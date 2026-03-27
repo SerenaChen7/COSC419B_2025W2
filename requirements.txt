@@ -6,4 +6,4 @@ SoccerNet
 mediapipe>=0.10.0
 opencv-python
 scikit-learn
-ultralytics
+easyocr

@@ -45,15 +45,14 @@ def parse_args():
     p.add_argument('--split', default='test',
                    choices=['train', 'test', 'challenge'],
                    help='Split to process (default: test)')
-    p.add_argument('--legibility-model',
-                   default='models/legibility_resnet34_soccer_20240215.pth',
-                   help='Path to legibility classifier checkpoint')
-    p.add_argument('--legibility-threshold', type=float, default=0.5,
-                   help='Min legibility score to keep a frame (default: 0.5)')
+    p.add_argument('--jnl-conf', type=float, default=0.2,
+                   help='EasyOCR detection confidence threshold (default: 0.2)')
+    p.add_argument('--roi-thresh', type=float, default=0.3,
+                   help='RoI I* threshold (default: 0.3)')
     p.add_argument('--ghc-clusters', type=int, default=2,
                    help='K-means clusters for GHC stage (default: 2)')
     p.add_argument('--device', default='cpu',
-                   help='Device for legibility model: cpu / cuda / mps')
+                   help='Device for EasyOCR: cpu / cuda / mps')
     p.add_argument('--overwrite', action='store_true',
                    help='Re-process tracklets that already have crops')
     return p.parse_args()
@@ -80,11 +79,11 @@ def main():
     if not images_dir.is_dir():
         raise FileNotFoundError(f'Images directory not found: {images_dir}')
 
-    # Initialise models (once, shared across all tracklets)
-    print('Loading legibility classifier...')
+    # Initialise KfId (EasyOCR loads once, shared across all tracklets)
+    print('Loading EasyOCR detector...')
     kfid = KfId(
-        legibility_model=args.legibility_model,
-        legibility_threshold=args.legibility_threshold,
+        jnl_conf=args.jnl_conf,
+        roi_thresh=args.roi_thresh,
         ghc_n_clusters=args.ghc_clusters,
         device=device,
     )
