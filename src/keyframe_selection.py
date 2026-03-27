@@ -1,5 +1,6 @@
 # V1 uses hardcoded constants
 # v2 normalizes sharpness and contrast based on the sampled frames in that tracklet
+# v3 add frame diversity filtering, only keep frames that are visually different enough
 from pathlib import Path
 import shutil
 import cv2
@@ -43,6 +44,20 @@ def minmax_normalize(values):
     return [(v - min_v) / (max_v - min_v) for v in values]
 
 
+def is_similar(img1_path, img2_path, threshold=10):
+    img1 = cv2.imread(str(img1_path))
+    img2 = cv2.imread(str(img2_path))
+
+    if img1 is None or img2 is None:
+        return False
+
+    img1 = cv2.resize(img1, (64, 64))
+    img2 = cv2.resize(img2, (64, 64))
+
+    diff = np.mean(np.abs(img1.astype(float) - img2.astype(float)))
+    return diff < threshold
+
+
 def select_keyframes(tracklet_dir, stride=3, top_k=5):
     frame_paths = get_frame_paths(tracklet_dir)
     sampled_paths = sample_frames(frame_paths, stride=stride)
@@ -83,8 +98,21 @@ def select_keyframes(tracklet_dir, stride=3, top_k=5):
 
     scored.sort(key=lambda x: x[1], reverse=True)
 
-    selected = [path for path, _ in scored[:top_k]]
-    selected.sort()  # preserve time order
+    selected = []
+    for path, score in scored:
+        if len(selected) >= top_k:
+            break
+
+        keep = True
+        for existing in selected:
+            if is_similar(path, existing):
+                keep = False
+                break
+
+        if keep:
+            selected.append(path)
+
+    selected.sort()  #time order
 
     return selected, scored
 
@@ -111,7 +139,9 @@ if __name__ == "__main__":
 
     tracklet_name = Path(tracklet_dir).name
     # output_dir = Path("outputs") / "selected_keyframes" / tracklet_name
-    output_dir = Path("outputs") / "selected_keyframes_v2" / tracklet_name
+    # output_dir = Path("outputs") / "selected_keyframes_v2" / tracklet_name
+    output_dir = Path("outputs") / "selected_keyframes_v3" / tracklet_name
+
     save_selected_keyframes(selected, output_dir)
 
     print(f"\nSaved selected keyframes to: {output_dir}")
