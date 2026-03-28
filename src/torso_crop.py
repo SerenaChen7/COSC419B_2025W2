@@ -1,22 +1,21 @@
 """
-Torso localization and cropping module.
+Torso localisation and cropping module  —  improved edition.
 
-Uses MediaPipe Pose Landmarker (Tasks API, mediapipe >= 0.10) to detect
-shoulder and hip keypoints, then crops the image to the upper-body / jersey
-region. Falls back to a fixed-ratio crop when pose detection fails (common on
-very small images).
+Key improvements over v1:
+  • Relaxed visibility threshold (0.25 → was 0.4) so low-confidence
+    keypoints on blurry / small crops are not rejected outright.
+  • Partial-keypoint fallback: if only shoulders (but not hips) are
+    visible, the crop height is estimated from shoulder width, which
+    works well for the common case of a partially-occluded player.
+  • Adjusted fallback band (0.10-0.75) keeps more of the jersey area,
+    especially the number printed on the lower chest.
+  • TORSO_BOT_PAD reduced (0.05) so we don't pull in irrelevant leg area.
+  • Upscale threshold raised to 320 px; higher resolution → better
+    landmark detection on tiny player crops.
 
-The MediaPipe model file (~3 MB) is downloaded automatically to
-~/.cache/mediapipe/ on first use.
-
-Usage:
+Usage (unchanged):
     from torso_crop import TorsoCropper
 
-    cropper = TorsoCropper()
-    crop, pose_detected = cropper.crop(pil_image)
-    cropper.close()
-
-    # or as a context manager:
     with TorsoCropper() as cropper:
         crop, pose_detected = cropper.crop(pil_image)
 """
@@ -43,7 +42,6 @@ _MODEL_CACHE = os.path.join(
 
 
 def _ensure_model() -> str:
-    """Download the pose landmarker model if not already cached. Returns path."""
     if not os.path.exists(_MODEL_CACHE):
         os.makedirs(os.path.dirname(_MODEL_CACHE), exist_ok=True)
         print(f"Downloading MediaPipe pose model to {_MODEL_CACHE} ...")
@@ -56,28 +54,35 @@ def _ensure_model() -> str:
 # Tunable constants
 # ---------------------------------------------------------------------------
 
-# Upscale images shorter than this before running MediaPipe (improves detection
-# on the very small player crops typical in this dataset: avg 53x98 px).
-UPSCALE_MIN_HEIGHT = 256
+# Upscale images shorter than this before running MediaPipe.
+# Higher → better detection on the tiny player crops in this dataset.
+UPSCALE_MIN_HEIGHT = 320
 
-# Padding applied around the shoulder-to-hip torso box, expressed as a
-# fraction of the torso height (shoulder_y to hip_y distance).
-TORSO_TOP_PAD = 0.10   # above the shoulders
-TORSO_BOT_PAD = 0.15   # below the hips
+# Padding around the shoulder-to-hip box as a fraction of torso height.
+TORSO_TOP_PAD = 0.10   # above shoulders (keep head/collar area)
+TORSO_BOT_PAD = 0.05   # below hips  (reduced – avoids pulling in legs)
 
-# Fixed-ratio fallback crop (fraction of image height) used when pose fails.
-FALLBACK_TOP = 0.15
-FALLBACK_BOT = 0.65
+# Fallback crop: fraction of image height kept when pose detection fails.
+# Raised bottom to 0.75 to capture the full jersey number.
+FALLBACK_TOP = 0.10
+FALLBACK_BOT = 0.75
 
-# Minimum MediaPipe landmark visibility score to accept a keypoint.
-MIN_KP_VISIBILITY = 0.4
+# Minimum MediaPipe visibility score to accept a keypoint.
+# Relaxed from 0.4 → 0.25 for blurry / small / partly-occluded players.
+MIN_KP_VISIBILITY = 0.25
 
-# MediaPipe PoseLandmarker landmark indices (same as BlazePose / COCO).
+# Shoulder-only mode: if hips are not visible but shoulders are, estimate
+# torso height as a multiple of shoulder width.
+SHOULDER_ONLY_HEIGHT_MULT = 1.8   # torso_h ≈ shoulder_width × 1.8
+
+# MediaPipe BlazePose landmark indices
 _LEFT_SHOULDER  = 11
 _RIGHT_SHOULDER = 12
 _LEFT_HIP       = 23
 _RIGHT_HIP      = 24
-_TORSO_KPS      = [_LEFT_SHOULDER, _RIGHT_SHOULDER, _LEFT_HIP, _RIGHT_HIP]
+_SHOULDER_KPS   = [_LEFT_SHOULDER, _RIGHT_SHOULDER]
+_HIP_KPS        = [_LEFT_HIP, _RIGHT_HIP]
+_TORSO_KPS      = _SHOULDER_KPS + _HIP_KPS
 
 
 class TorsoCropper:
@@ -87,17 +92,16 @@ class TorsoCropper:
     Parameters
     ----------
     min_detection_confidence : float
-        Minimum confidence for pose detection. Lower values detect more poses
-        but with more false positives. 0.3 works well for small, blurry crops.
+        Minimum confidence for pose detection.
     """
 
-    def __init__(self, min_detection_confidence: float = 0.3):
+    def __init__(self, min_detection_confidence: float = 0.25):
         model_path = _ensure_model()
 
-        PoseLandmarker = mp.tasks.vision.PoseLandmarker
+        PoseLandmarker      = mp.tasks.vision.PoseLandmarker
         PoseLandmarkerOptions = mp.tasks.vision.PoseLandmarkerOptions
-        BaseOptions = mp.tasks.BaseOptions
-        VisionRunningMode = mp.tasks.vision.RunningMode
+        BaseOptions         = mp.tasks.BaseOptions
+        VisionRunningMode   = mp.tasks.vision.RunningMode
 
         options = PoseLandmarkerOptions(
             base_options=BaseOptions(model_asset_path=model_path),
@@ -114,27 +118,17 @@ class TorsoCropper:
 
     def crop(self, img: Image.Image) -> tuple[Image.Image, bool]:
         """
-        Return a torso crop of *img* and whether pose was successfully detected.
+        Return (torso_crop, pose_detected).
 
-        Parameters
-        ----------
-        img : PIL.Image
-            Original player-bounding-box thumbnail (any size / mode).
-
-        Returns
-        -------
-        cropped : PIL.Image
-            The torso-region crop (RGB).
-        pose_detected : bool
-            True  -> crop was derived from MediaPipe shoulder/hip keypoints.
-            False -> fallback fixed-ratio crop was used.
+        pose_detected=True  → crop from MediaPipe shoulder/hip keypoints.
+        pose_detected=False → fallback fixed-ratio crop.
         """
         img = img.convert('RGB')
         W, H = img.size
 
-        # --- Upscale for better MediaPipe detection on tiny images ---
+        # Upscale for better landmark detection on tiny images
         if H < UPSCALE_MIN_HEIGHT:
-            scale = UPSCALE_MIN_HEIGHT / H
+            scale    = UPSCALE_MIN_HEIGHT / H
             upscaled = img.resize(
                 (max(1, round(W * scale)), UPSCALE_MIN_HEIGHT),
                 Image.BICUBIC,
@@ -142,13 +136,13 @@ class TorsoCropper:
         else:
             upscaled = img
 
-        # --- Run MediaPipe ---
         rgb_array = np.array(upscaled, dtype=np.uint8)
-        mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb_array)
-        result = self._landmarker.detect(mp_image)
+        mp_image  = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb_array)
+        result    = self._landmarker.detect(mp_image)
 
         if result.pose_landmarks:
-            pose_crop = self._pose_crop(img, result.pose_landmarks[0])
+            lm = result.pose_landmarks[0]
+            pose_crop = self._pose_crop(img, lm)
             if pose_crop is not None:
                 return pose_crop, True
 
@@ -167,60 +161,62 @@ class TorsoCropper:
     # Internal helpers
     # ------------------------------------------------------------------
 
-    def _pose_crop(
-        self,
-        img: Image.Image,
-        landmarks: list,
-    ) -> Image.Image | None:
+    def _visible(self, landmarks, indices: list[int]) -> bool:
+        return all(landmarks[i].visibility >= MIN_KP_VISIBILITY for i in indices)
+
+    def _pose_crop(self, img: Image.Image, landmarks: list) -> Image.Image | None:
         """
         Derive a torso bounding box from shoulder + hip landmarks.
 
-        Landmark (x, y) values are normalised to [0, 1] relative to the
-        image passed to the landmarker (the upscaled one). Since normalised
-        coords map to [0,1] regardless of resolution, they are directly
-        applied to the *original* image dimensions.
-
-        Returns None if keypoints are low-confidence or the box is degenerate.
+        Falls back to shoulder-only mode when hips are not confidently detected.
+        Returns None when keypoints are too low-confidence or the box is degenerate.
         """
         W, H = img.size
 
-        # Check that all four torso keypoints are visible enough.
-        for idx in _TORSO_KPS:
-            if landmarks[idx].visibility < MIN_KP_VISIBILITY:
-                return None
+        shoulders_ok = self._visible(landmarks, _SHOULDER_KPS)
+        hips_ok      = self._visible(landmarks, _HIP_KPS)
 
-        shoulder_ys = [landmarks[_LEFT_SHOULDER].y * H,
-                       landmarks[_RIGHT_SHOULDER].y * H]
-        hip_ys      = [landmarks[_LEFT_HIP].y * H,
-                       landmarks[_RIGHT_HIP].y * H]
+        if not shoulders_ok:
+            return None  # can't do anything useful without shoulders
 
-        top_y    = min(shoulder_ys)
-        bottom_y = max(hip_ys)
-        torso_h  = max(bottom_y - top_y, 1.0)
+        # ── Shoulder y-coordinates ────────────────────────────────────────────
+        left_sh_y  = landmarks[_LEFT_SHOULDER].y  * H
+        right_sh_y = landmarks[_RIGHT_SHOULDER].y * H
+        left_sh_x  = landmarks[_LEFT_SHOULDER].x  * W
+        right_sh_x = landmarks[_RIGHT_SHOULDER].x * W
+        top_y      = min(left_sh_y, right_sh_y)
+        shoulder_width = abs(left_sh_x - right_sh_x)
 
+        if hips_ok:
+            # Full torso box
+            bottom_y = max(
+                landmarks[_LEFT_HIP].y  * H,
+                landmarks[_RIGHT_HIP].y * H,
+            )
+        else:
+            # Estimate torso height from shoulder width
+            est_torso_h = max(shoulder_width * SHOULDER_ONLY_HEIGHT_MULT, 20.0)
+            bottom_y    = top_y + est_torso_h
+
+        torso_h = max(bottom_y - top_y, 1.0)
         y1 = top_y    - TORSO_TOP_PAD * torso_h
         y2 = bottom_y + TORSO_BOT_PAD * torso_h
 
-        # Keep full width — horizontal crops are already tight (avg 53 px).
+        # Full width (horizontal crops are already tight)
         x1, x2 = 0, W
 
-        # Clamp to image bounds.
-        y1 = max(0, round(y1))
-        y2 = min(H, round(y2))
+        y1 = max(0,  round(y1))
+        y2 = min(H,  round(y2))
 
-        # Reject degenerate boxes.
         if (y2 - y1) < 10 or (x2 - x1) < 10:
             return None
 
         return img.crop((x1, y1, x2, y2))
 
     def _fallback_crop(self, img: Image.Image) -> Image.Image:
-        """
-        Fixed-ratio crop: keep rows [FALLBACK_TOP, FALLBACK_BOT] of image height,
-        full width. Removes head and legs when pose detection fails.
-        """
+        """Keep rows [FALLBACK_TOP, FALLBACK_BOT] of image height, full width."""
         W, H = img.size
         y1 = round(FALLBACK_TOP * H)
         y2 = round(FALLBACK_BOT * H)
-        y2 = max(y2, y1 + 1)  # ensure at least 1 px tall
+        y2 = max(y2, y1 + 1)
         return img.crop((0, y1, W, y2))
