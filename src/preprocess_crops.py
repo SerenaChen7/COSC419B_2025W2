@@ -315,7 +315,7 @@ def process_split(split, data_dir, overwrite, n_workers, dry_run):
         # chunksize=1: each worker returns one result at a time.
         # MediaPipe inference (~50ms/image) massively dominates IPC overhead,
         # so chunksize=1 costs nothing in speed but makes tqdm update live.
-        ctx = mp.get_context('fork')
+        ctx = mp.get_context('spawn')
         with ctx.Pool(processes=n_workers, initializer=_init_worker) as pool:
             with tqdm(total=total, desc=f'{split:5s}') as pbar:
                 for did_process, pose_ok in pool.imap_unordered(
