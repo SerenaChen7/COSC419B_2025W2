@@ -54,6 +54,9 @@ def parse_args():
                    help='Cap total tracklets for quick sanity checks')
     p.add_argument('--workers',   type=int, default=2)
     p.add_argument('--output-dir',default='outputs')
+    p.add_argument('--seed',      type=int, default=None)
+    p.add_argument('--dropout',   type=float, default=0.3,
+                   help='Dropout probability applied after Bi-LSTM (0.0 = no dropout)')
     return p.parse_args()
 
 
@@ -132,6 +135,7 @@ def main():
 
     n_tracklets = len(full_ds)
     indices = list(range(n_tracklets))
+    random.seed(args.seed)
     random.shuffle(indices)
 
     if args.max_tracklets and args.max_tracklets < n_tracklets:
@@ -172,7 +176,7 @@ def main():
     )
 
     # --- Model ---
-    model = SpatioTemporalNetwork(pretrained=True).to(device)
+    model = SpatioTemporalNetwork(pretrained=True, dropout=args.dropout).to(device)
 
     # Phase 1: freeze the spatial encoder, train only LSTM + heads
     for param in model.encoder.parameters():
