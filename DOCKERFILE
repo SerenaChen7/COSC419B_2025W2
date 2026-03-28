@@ -1,0 +1,51 @@
+FROM pytorch/pytorch:2.3.1-cuda12.1-cudnn8-runtime
+
+WORKDIR /workspace
+
+# System deps
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    # Basic image/display libs
+    libgl1 \
+    libglib2.0-0 \
+    libsm6 \
+    libxext6 \
+    libxrender-dev \
+    # EGL and GLES - what MediaPipe actually needs
+    libegl1 \
+    libgles2 \
+    # Mesa software rendering fallback (no GPU needed for MediaPipe CPU inference)
+    libgl1-mesa-glx \
+    libegl1-mesa \
+    libgles2-mesa \
+    libglvnd0 \
+    libglvnd-dev \
+    wget curl git \
+    && rm -rf /var/lib/apt/lists/*
+
+# Force MediaPipe to use software rendering - no display/GPU needed
+ENV LIBGL_ALWAYS_SOFTWARE=1
+
+# Python deps
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Pre-download MediaPipe pose model into the image so workers don't race to download it
+RUN python - <<'EOF'
+import os, urllib.request
+url = (
+    "https://storage.googleapis.com/mediapipe-models/"
+    "pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task"
+)
+dst = os.path.expanduser("~/.cache/mediapipe/pose_landmarker_lite.task")
+os.makedirs(os.path.dirname(dst), exist_ok=True)
+print(f"Downloading MediaPipe model -> {dst}")
+urllib.request.urlretrieve(url, dst)
+print("Done.")
+EOF
+
+COPY src/ ./src/
+
+ENV PYTHONPATH=/workspace/src
+
+# Default: interactive shell so the user can run any script
+CMD ["/bin/bash"]

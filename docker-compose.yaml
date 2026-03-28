@@ -1,0 +1,93 @@
+services:
+  # ── Pre-compute torso crops ────────────────────────────────────────────────
+  preprocess:
+    build:
+      context: .
+      dockerfile: DOCKERFILE
+    image: jersey-recognition:latest
+    volumes:
+      - ./data:/workspace/data
+      - ./src:/workspace/src                            # pick up latest src changes
+      - ~/.cache/mediapipe:/root/.cache/mediapipe       # reuse cached MediaPipe model
+    environment:
+      - OMP_NUM_THREADS=4
+      - MKL_NUM_THREADS=4
+    command: >
+      python src/preprocess_crops.py
+        --data-dir data/jersey-2023
+        --split all
+        --workers 4
+    shm_size: "2gb"
+
+  # ── Training ───────────────────────────────────────────────────────────────
+  train:
+    build:
+      context: .
+      dockerfile: DOCKERFILE
+    image: jersey-recognition:latest
+    volumes:
+      - ./data:/workspace/data
+      - ./outputs:/workspace/outputs
+      - ./src:/workspace/src
+    environment:
+      - OMP_NUM_THREADS=4       # OpenMP threads (used by PyTorch CPU kernels)
+      - MKL_NUM_THREADS=4       # MKL threads (Intel math library)
+      - PYTORCH_NO_CUDA_MEMORY_CACHING=1   # don't reserve GPU cache on a CPU-only host
+    command: >
+      python src/train.py
+        --data-dir data/jersey-2023
+        --crops-dir data/jersey-2023/train/crops
+        --arch mobilenet_v3_large
+        --epochs 25
+        --batch-size 32
+        --lr 1e-3
+        --img-size 128
+        --max-per-tracklet 25
+        --freeze-epochs 2
+        --workers 2
+        --label-smoothing 0.1
+        --patience 5
+        --output-dir outputs
+    shm_size: "2gb"
+
+  # ── Inference ──────────────────────────────────────────────────────────────
+  predict:
+    build:
+      context: .
+      dockerfile: DOCKERFILE
+    image: jersey-recognition:latest
+    volumes:
+      - ./data:/workspace/data
+      - ./outputs:/workspace/outputs
+      - ./src:/workspace/src
+    environment:
+      - PYTORCH_NO_CUDA_MEMORY_CACHING=1
+    command: >
+      python src/predict.py
+        --data-dir data/jersey-2023
+        --crops-dir data/jersey-2023/test/crops
+        --checkpoint outputs/best_model.pth
+        --output outputs/predictions.json
+        --img-size 128
+        --batch-size 128
+        --max-images 50
+        --tta
+        --gt data/jersey-2023/test/test_gt.json
+    shm_size: "2gb"
+
+  # ── Evaluation ─────────────────────────────────────────────────────────────
+  evaluate:
+    build:
+      context: .
+      dockerfile: DOCKERFILE
+    image: jersey-recognition:latest
+    volumes:
+      - ./data:/workspace/data
+      - ./outputs:/workspace/outputs
+      - ./src:/workspace/src
+    environment:
+      - PYTHONUNBUFFERED=1
+    command: >
+      python src/run_evaluate.py
+        --predictions outputs/predictions.json
+        --ground-truth data/jersey-2023/test/test_gt.json
