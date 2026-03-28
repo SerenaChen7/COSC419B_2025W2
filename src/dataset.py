@@ -220,13 +220,13 @@ def get_train_transforms(img_size: int = 128):
     """
     return T.Compose([
         T.Resize((img_size, img_size)),
+        T.RandomHorizontalFlip(p=0.5),
         T.ColorJitter(brightness=0.4, contrast=0.4, saturation=0.3),
         T.RandomAffine(degrees=10, translate=(0.08, 0.08), scale=(0.85, 1.15)),
-        T.RandomPerspective(distortion_scale=0.1, p=0.2),
+        T.RandomPerspective(distortion_scale=0.05, p=0.1),
         T.ToTensor(),
         T.Normalize(mean=[0.485, 0.456, 0.406],
                     std=[0.229, 0.224, 0.225]),
-        T.RandomErasing(p=0.1, scale=(0.01, 0.05)),
     ])
 
 
@@ -293,7 +293,12 @@ class JerseyTrainDataset(Dataset):
             tracklet_id = os.path.basename(os.path.dirname(img_path))
             fname = os.path.basename(img_path)
             crop_path = os.path.join(self.crops_dir, tracklet_id, fname)
-            load_path = crop_path if os.path.exists(crop_path) else img_path
+            if not os.path.exists(crop_path):
+                raise FileNotFoundError(
+                    f"Crop missing: {crop_path}\n"
+                    "Run preprocess_crops.py before training with --crops-dir."
+                )
+            load_path = crop_path
         else:
             load_path = img_path
         img = Image.open(load_path).convert('RGB')
@@ -334,7 +339,12 @@ class JerseyTestDataset(Dataset):
         for p in orig_paths:
             fname = os.path.basename(p)
             crop_path = os.path.join(self.crops_dir, tracklet_id, fname)
-            resolved.append(crop_path if os.path.exists(crop_path) else p)
+            if not os.path.exists(crop_path):
+                raise FileNotFoundError(
+                    f"Crop missing: {crop_path}\n"
+                    "Run preprocess_crops.py --split test before inference."
+                )
+            resolved.append(crop_path)
         return resolved
 
     def load_images(self, paths):

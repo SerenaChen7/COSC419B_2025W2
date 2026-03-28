@@ -48,9 +48,7 @@ def parse_args():
     p.add_argument('--epochs', type=int, default=15)
     p.add_argument('--batch-size', type=int, default=32)
     p.add_argument('--lr', type=float, default=1e-3)
-    # 128×128: minimum reliable resolution for reading jersey digits
-    # ~3× faster than 224×224, still enough for digit features
-    p.add_argument('--img-size', type=int, default=128)
+    p.add_argument('--img-size', type=int, default=224)
     # 25 images/tracklet: covers ~55% of each tracklet over 15 epochs via resampling
     p.add_argument('--max-per-tracklet', type=int, default=25)
     # Limit total tracklets — useful for quick accuracy checks before full training
