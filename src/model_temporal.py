@@ -45,7 +45,7 @@ class SpatioTemporalNetwork(nn.Module):
       4. Two linear heads predict the tens and units digits separately
     """
 
-    def __init__(self, pretrained: bool = True):
+    def __init__(self, pretrained: bool = True, dropout: float = 0.0):
         super().__init__()
         self.encoder = SpatialEncoder(pretrained=pretrained)
         self.bilstm = nn.LSTM(
@@ -54,7 +54,9 @@ class SpatioTemporalNetwork(nn.Module):
             num_layers=LSTM_LAYERS,
             batch_first=True,
             bidirectional=True,
+            dropout=dropout if LSTM_LAYERS > 1 else 0.0,
         )
+        self.dropout = nn.Dropout(p=dropout)
         temporal_dim = LSTM_HIDDEN * 2   # 256
         self.head_d1 = nn.Linear(temporal_dim, NUM_DIGIT_CLASSES)
         self.head_d2 = nn.Linear(temporal_dim, NUM_DIGIT_CLASSES)
@@ -65,6 +67,7 @@ class SpatioTemporalNetwork(nn.Module):
         feats = feats.view(B, T, -1)                    # (B, T, 512)
         lstm_out, _ = self.bilstm(feats)                # (B, T, 256)
         temporal = lstm_out.mean(dim=1)                 # (B, 256)
+        temporal = self.dropout(temporal)               # dropout before heads
         return self.head_d1(temporal), self.head_d2(temporal)
 
 
@@ -122,6 +125,8 @@ def save_checkpoint(path: str, model: nn.Module, optimizer, epoch: int,
 
 def load_checkpoint(path: str, device: torch.device) -> 'SpatioTemporalNetwork':
     state = torch.load(path, map_location=device)
-    model = SpatioTemporalNetwork(pretrained=False)
+    saved_args = state.get('args', {})
+    dropout = saved_args.get('dropout', 0.0)
+    model = SpatioTemporalNetwork(pretrained=False, dropout=dropout)
     model.load_state_dict(state['model_state_dict'])
     return model
