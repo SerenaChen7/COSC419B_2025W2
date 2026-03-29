@@ -243,27 +243,51 @@ class JerseyTrainDataset(Dataset):
     """
     Per-image dataset for training.
     Optionally subsamples up to `max_per_tracklet` images per tracklet per epoch.
+
+    If `use_keyframes` is True, keyframe selection (sharpness/contrast/diversity)
+    is run once at load time to pre-filter each tracklet to its best frames.
+    This replaces random subsampling and aligns the training distribution with
+    the keyframe-based inference path in predict.py.
     """
 
     def __init__(self, images_dir: str, gt_json: str,
                  transform=None, max_per_tracklet: int = None,
-                 crops_dir: str = None):
+                 crops_dir: str = None, use_keyframes: bool = False,
+                 keyframe_top_k: int = 5):
         self.transform = transform
         self.max_per_tracklet = max_per_tracklet
         self.crops_dir = crops_dir
+        self.use_keyframes = use_keyframes
+        self.keyframe_top_k = keyframe_top_k
         self._load(images_dir, gt_json)
 
     def _load(self, images_dir: str, gt_json: str):
         with open(gt_json) as f:
             gt = json.load(f)
 
+        if self.use_keyframes:
+            from keyframe_selection import select_keyframes
+
         self.tracklets = []
         for tracklet_id, jersey_num in gt.items():
             tracklet_dir = os.path.join(images_dir, tracklet_id)
             if not os.path.isdir(tracklet_dir):
                 continue
-            imgs = [os.path.join(tracklet_dir, f)
-                    for f in os.listdir(tracklet_dir) if f.lower().endswith('.jpg')]
+
+            if self.use_keyframes:
+                # Run keyframe selection once at load time — same scoring logic
+                # used at inference so train/test distributions are aligned.
+                selected_paths, _ = select_keyframes(
+                    tracklet_dir, stride=3, top_k=self.keyframe_top_k
+                )
+                imgs = [str(p) for p in selected_paths] if selected_paths else [
+                    os.path.join(tracklet_dir, f)
+                    for f in os.listdir(tracklet_dir) if f.lower().endswith('.jpg')
+                ]
+            else:
+                imgs = [os.path.join(tracklet_dir, f)
+                        for f in os.listdir(tracklet_dir) if f.lower().endswith('.jpg')]
+
             if not imgs:
                 continue
             class_idx = jersey_to_class(jersey_num)
@@ -274,7 +298,9 @@ class JerseyTrainDataset(Dataset):
     def _build_samples(self):
         self.samples = []
         for imgs, class_idx in self.tracklets:
-            if self.max_per_tracklet and len(imgs) > self.max_per_tracklet:
+            # Skip random subsampling when keyframes are pre-selected —
+            # the set is already small and high-quality.
+            if not self.use_keyframes and self.max_per_tracklet and len(imgs) > self.max_per_tracklet:
                 selected = random.sample(imgs, self.max_per_tracklet)
             else:
                 selected = imgs

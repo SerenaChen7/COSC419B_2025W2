@@ -62,11 +62,16 @@ def parse_args():
     p.add_argument('--patience', type=int, default=5,
                    help='Early-stopping patience (epochs with no val improvement)')
     p.add_argument('--output-dir', default='outputs')
-    p.add_argument('--workers', type=int, default=2)
+    p.add_argument('--workers', type=int, default=4)
     p.add_argument('--freeze-epochs', type=int, default=2,
                    help='Epochs to train only the head before unfreezing the backbone')
     p.add_argument('--crops-dir', default=None,
                    help='Path to pre-computed torso crops (output of preprocess_crops.py)')
+    p.add_argument('--use-keyframes', action='store_true',
+                   help='Select top-k keyframes per tracklet during training (sharpness/contrast/'
+                        'diversity). Aligns training distribution with keyframe-based inference.')
+    p.add_argument('--keyframe-top-k', type=int, default=5,
+                   help='Number of keyframes to select per tracklet when --use-keyframes is set.')
     return p.parse_args()
 
 
@@ -113,16 +118,16 @@ def val_epoch(model, loader, criterion, device):
     return total_loss / n, total_acc / n
 
 
-def make_loader(dataset, batch_size, shuffle, workers):
-    """Create a DataLoader with settings tuned for CPU training."""
+def make_loader(dataset, batch_size, shuffle, workers, device):
+    """Create a DataLoader with settings tuned for the active device."""
     use_persistent = workers > 0
     return DataLoader(
         dataset,
         batch_size=batch_size,
         shuffle=shuffle,
         num_workers=workers,
-        pin_memory=False,          # pin_memory only helps CUDA; wastes memory on CPU
-        persistent_workers=use_persistent,  # avoids worker restart overhead each epoch
+        pin_memory=device.type == 'cuda',   # speeds up CPU->GPU transfers
+        persistent_workers=use_persistent,
     )
 
 
@@ -145,6 +150,8 @@ def main():
         transform=get_train_transforms(args.img_size),
         max_per_tracklet=args.max_per_tracklet,
         crops_dir=args.crops_dir,
+        use_keyframes=args.use_keyframes,
+        keyframe_top_k=args.keyframe_top_k,
     )
 
     # Split by tracklets to avoid data leakage
@@ -166,12 +173,15 @@ def main():
         transform=get_train_transforms(args.img_size),
         max_per_tracklet=args.max_per_tracklet,
         crops_dir=args.crops_dir,
+        use_keyframes=args.use_keyframes,
+        keyframe_top_k=args.keyframe_top_k,
     )
     val_ds = JerseyTrainDataset(
         train_images, train_gt,
         transform=get_val_transforms(args.img_size),
         max_per_tracklet=None,
         crops_dir=args.crops_dir,
+        # Val uses all frames for a stable accuracy signal, not keyframe subset
     )
 
     train_ds.tracklets = [train_ds.tracklets[i] for i in sorted(train_tracklet_idx)]
@@ -179,10 +189,12 @@ def main():
     train_ds._build_samples()
     val_ds._build_samples()
 
+    if args.use_keyframes:
+        print(f'Keyframe selection enabled for training (top_k={args.keyframe_top_k})')
     print(f'Train: {len(train_ds.tracklets)} tracklets, {len(train_ds)} images')
     print(f'Val:   {len(val_ds.tracklets)} tracklets, {len(val_ds)} images')
 
-    val_loader = make_loader(val_ds, args.batch_size, shuffle=False, workers=args.workers)
+    val_loader = make_loader(val_ds, args.batch_size, shuffle=False, workers=args.workers, device=device)
 
     # --- Model ---
     model = build_model(pretrained=True, arch=args.arch).to(device)
@@ -227,7 +239,7 @@ def main():
 
         # Resample training images from tracklets each epoch
         train_ds.resample()
-        train_loader = make_loader(train_ds, args.batch_size, shuffle=True, workers=args.workers)
+        train_loader = make_loader(train_ds, args.batch_size, shuffle=True, workers=args.workers, device=device)
 
         train_loss, train_acc = train_epoch(model, train_loader, criterion, optimizer, device, scaler)
         val_loss, val_acc = val_epoch(model, val_loader, criterion, device)
