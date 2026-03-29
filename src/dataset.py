@@ -243,27 +243,42 @@ class JerseyTrainDataset(Dataset):
     """
     Per-image dataset for training.
     Optionally subsamples up to `max_per_tracklet` images per tracklet per epoch.
+    When `use_keyframes=True`, each tracklet's image pool is pre-filtered to the
+    highest-quality frames (sharpness + contrast), keeping 2× max_per_tracklet
+    candidates so resample() still provides epoch-to-epoch variation.
     """
 
     def __init__(self, images_dir: str, gt_json: str,
                  transform=None, max_per_tracklet: int = None,
-                 crops_dir: str = None):
+                 crops_dir: str = None, use_keyframes: bool = False):
         self.transform = transform
         self.max_per_tracklet = max_per_tracklet
         self.crops_dir = crops_dir
+        self.use_keyframes = use_keyframes
         self._load(images_dir, gt_json)
 
     def _load(self, images_dir: str, gt_json: str):
         with open(gt_json) as f:
             gt = json.load(f)
 
+        if self.use_keyframes:
+            from keyframe_selection import select_keyframes
+
         self.tracklets = []
         for tracklet_id, jersey_num in gt.items():
             tracklet_dir = os.path.join(images_dir, tracklet_id)
             if not os.path.isdir(tracklet_dir):
                 continue
-            imgs = [os.path.join(tracklet_dir, f)
-                    for f in os.listdir(tracklet_dir) if f.lower().endswith('.jpg')]
+            if self.use_keyframes:
+                pool_k = (self.max_per_tracklet or 25) * 2
+                selected, _ = select_keyframes(tracklet_dir, stride=1, top_k=pool_k)
+                imgs = [str(p) for p in selected]
+                if not imgs:  # fallback if keyframe selection fails
+                    imgs = [os.path.join(tracklet_dir, f)
+                            for f in os.listdir(tracklet_dir) if f.lower().endswith('.jpg')]
+            else:
+                imgs = [os.path.join(tracklet_dir, f)
+                        for f in os.listdir(tracklet_dir) if f.lower().endswith('.jpg')]
             if not imgs:
                 continue
             class_idx = jersey_to_class(jersey_num)

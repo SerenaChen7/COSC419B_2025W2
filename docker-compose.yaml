@@ -16,7 +16,6 @@ services:
       python src/preprocess_crops.py
         --data-dir data/jersey-2023
         --split all
-        --workers 4
     shm_size: "2gb"
 
   # ── Training ───────────────────────────────────────────────────────────────
@@ -48,6 +47,7 @@ services:
         --label-smoothing 0.1
         --patience 5
         --output-dir outputs
+        --keyframes
     shm_size: "2gb"
 
   # ── Inference ──────────────────────────────────────────────────────────────
@@ -70,7 +70,7 @@ services:
         --output outputs/predictions.json
         --img-size 128
         --batch-size 128
-        --max-images 50
+        --keyframes
         --tta
         --gt data/jersey-2023/test/test_gt.json
     shm_size: "2gb"
