@@ -1,147 +1,97 @@
-# V1 uses hardcoded constants
-# v2 normalizes sharpness and contrast based on the sampled frames in that tracklet
-# v3 add frame diversity filtering, only keep frames that are visually different enough
+"""
+Keyframe selection for jersey number recognition.
+
+Scores frames by sharpness, brightness, and contrast, then deduplicates
+near-identical frames so the selected pool covers distinct moments.
+
+Usage:
+    from keyframe_selection import select_keyframes
+    selected, scored = select_keyframes(tracklet_dir, stride=3, top_k=10)
+"""
 from pathlib import Path
-import shutil
 import cv2
 import numpy as np
 
 
-def get_frame_paths(tracklet_dir):
-    tracklet_dir = Path(tracklet_dir)
-    exts = {".jpg", ".jpeg", ".png"}
-    return sorted([p for p in tracklet_dir.iterdir() if p.suffix.lower() in exts])
+def _get_frame_paths(tracklet_dir):
+    exts = {'.jpg', '.jpeg', '.png'}
+    return sorted(p for p in Path(tracklet_dir).iterdir() if p.suffix.lower() in exts)
 
 
-def sample_frames(frame_paths, stride=3):
-    return frame_paths[::stride]
-
-
-def extract_frame_metrics(image_path):
+def _extract_metrics(image_path):
     img = cv2.imread(str(image_path))
     if img is None:
         return None
-
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-
-    sharpness = cv2.Laplacian(gray, cv2.CV_64F).var()
-    brightness = gray.mean()
-    contrast = gray.std()
-
     return {
-        "path": image_path,
-        "sharpness": float(sharpness),
-        "brightness": float(brightness),
-        "contrast": float(contrast),
+        'path':       image_path,
+        'sharpness':  float(cv2.Laplacian(gray, cv2.CV_64F).var()),
+        'brightness': float(gray.mean()),
+        'contrast':   float(gray.std()),
     }
 
 
-def minmax_normalize(values):
-    min_v = min(values)
-    max_v = max(values)
-    if max_v == min_v:
-        return [1.0 for _ in values]
-    return [(v - min_v) / (max_v - min_v) for v in values]
+def _minmax(values):
+    lo, hi = min(values), max(values)
+    if hi == lo:
+        return [1.0] * len(values)
+    return [(v - lo) / (hi - lo) for v in values]
 
 
-def is_similar(img1_path, img2_path, threshold=10):
-    img1 = cv2.imread(str(img1_path))
-    img2 = cv2.imread(str(img2_path))
-
-    if img1 is None or img2 is None:
+def _is_similar(p1, p2, threshold=10):
+    i1 = cv2.imread(str(p1))
+    i2 = cv2.imread(str(p2))
+    if i1 is None or i2 is None:
         return False
-
-    img1 = cv2.resize(img1, (64, 64))
-    img2 = cv2.resize(img2, (64, 64))
-
-    diff = np.mean(np.abs(img1.astype(float) - img2.astype(float)))
-    return diff < threshold
+    i1 = cv2.resize(i1, (64, 64))
+    i2 = cv2.resize(i2, (64, 64))
+    return np.mean(np.abs(i1.astype(float) - i2.astype(float))) < threshold
 
 
 def select_keyframes(tracklet_dir, stride=3, top_k=5):
-    frame_paths = get_frame_paths(tracklet_dir)
-    sampled_paths = sample_frames(frame_paths, stride=stride)
+    """
+    Return the top_k highest-quality, visually distinct frames from a tracklet.
 
-    metrics = []
-    for path in sampled_paths:
-        m = extract_frame_metrics(path)
-        if m is not None:
-            metrics.append(m)
+    Parameters
+    ----------
+    tracklet_dir : str or Path
+    stride       : sample every Nth frame before scoring (reduces cost)
+    top_k        : maximum number of frames to return
 
+    Returns
+    -------
+    selected : list[Path]   – up to top_k frames in time order
+    scored   : list[tuple]  – all (path, score) pairs, sorted by score desc
+    """
+    frame_paths = _get_frame_paths(tracklet_dir)
+    sampled = frame_paths[::stride]
+
+    metrics = [m for m in (_extract_metrics(p) for p in sampled) if m is not None]
     if not metrics:
         return [], []
 
-    sharpness_vals = [m["sharpness"] for m in metrics]
-    contrast_vals = [m["contrast"] for m in metrics]
-    brightness_vals = [m["brightness"] for m in metrics]
+    sharpness_scores  = _minmax([m['sharpness']  for m in metrics])
+    contrast_scores   = _minmax([m['contrast']   for m in metrics])
+    brightness_vals   = [m['brightness'] for m in metrics]
+    center            = float(np.median(brightness_vals))
+    max_dist          = max(abs(v - center) for v in brightness_vals) or 1.0
+    brightness_scores = [1.0 - abs(v - center) / max_dist for v in brightness_vals]
 
-    sharpness_scores = minmax_normalize(sharpness_vals)
-    contrast_scores = minmax_normalize(contrast_vals)
-
-    # brightness: prefer values near the tracklet median
-    brightness_center = np.median(brightness_vals)
-    brightness_distances = [abs(v - brightness_center) for v in brightness_vals]
-
-    if max(brightness_distances) == 0:
-        brightness_scores = [1.0 for _ in brightness_distances]
-    else:
-        brightness_scores = [1.0 - (d / max(brightness_distances)) for d in brightness_distances]
-
-    scored = []
-    for i, m in enumerate(metrics):
-        final_score = (
-            0.6 * sharpness_scores[i] +
-            0.2 * brightness_scores[i] +
-            0.2 * contrast_scores[i]
-        )
-        scored.append((m["path"], float(final_score)))
-
-    scored.sort(key=lambda x: x[1], reverse=True)
+    scored = sorted(
+        [
+            (m['path'], 0.6 * sharpness_scores[i]
+                       + 0.2 * brightness_scores[i]
+                       + 0.2 * contrast_scores[i])
+            for i, m in enumerate(metrics)
+        ],
+        key=lambda x: x[1], reverse=True,
+    )
 
     selected = []
     for path, score in scored:
         if len(selected) >= top_k:
             break
-
-        keep = True
-        for existing in selected:
-            if is_similar(path, existing):
-                keep = False
-                break
-
-        if keep:
+        if all(not _is_similar(path, s) for s in selected):
             selected.append(path)
 
-    selected.sort()  #time order
-
-    return selected, scored
-
-
-def save_selected_keyframes(selected_paths, output_dir):
-    output_dir = Path(output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
-
-    for path in selected_paths:
-        shutil.copy(path, output_dir / path.name)
-
-
-if __name__ == "__main__":
-    tracklet_dir = input("Enter tracklet folder path: ").strip()
-    selected, scored = select_keyframes(tracklet_dir, stride=3, top_k=5)
-
-    print("\nTop selected frames:")
-    for path in selected:
-        print(path)
-
-    print("\nTop 10 scored frames:")
-    for path, score in scored[:10]:
-        print(f"{path.name}: {score:.4f}")
-
-    tracklet_name = Path(tracklet_dir).name
-    # output_dir = Path("outputs") / "selected_keyframes" / tracklet_name
-    # output_dir = Path("outputs") / "selected_keyframes_v2" / tracklet_name
-    output_dir = Path("outputs") / "selected_keyframes_v3" / tracklet_name
-
-    save_selected_keyframes(selected, output_dir)
-
-    print(f"\nSaved selected keyframes to: {output_dir}")
+    return sorted(selected), scored  # time order
