@@ -62,10 +62,6 @@ UPSCALE_MIN_HEIGHT = 320
 TORSO_TOP_PAD = 0.10   # above shoulders (keep head/collar area)
 TORSO_BOT_PAD = 0.05   # below hips  (reduced – avoids pulling in legs)
 
-# Fallback crop: fraction of image height kept when pose detection fails.
-# Raised bottom to 0.75 to capture the full jersey number.
-FALLBACK_TOP = 0.10
-FALLBACK_BOT = 0.75
 
 # Minimum MediaPipe visibility score to accept a keypoint.
 # Relaxed from 0.4 → 0.25 for blurry / small / partly-occluded players.
@@ -214,9 +210,7 @@ class TorsoCropper:
         return img.crop((x1, y1, x2, y2))
 
     def _fallback_crop(self, img: Image.Image) -> Image.Image:
-        """Keep rows [FALLBACK_TOP, FALLBACK_BOT] of image height, full width."""
-        W, H = img.size
-        y1 = round(FALLBACK_TOP * H)
-        y2 = round(FALLBACK_BOT * H)
-        y2 = max(y2, y1 + 1)
-        return img.crop((0, y1, W, y2))
+        """Return the full image when pose detection fails.
+        The jersey number is somewhere in the full frame; a wrong fixed-ratio
+        crop is more harmful than keeping the full context."""
+        return img

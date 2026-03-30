@@ -41,7 +41,7 @@ services:
         --epochs 25
         --batch-size 32
         --lr 1e-3
-        --img-size 128
+        --img-size 224
         --max-per-tracklet 25
         --freeze-epochs 2
         --workers 2
@@ -68,10 +68,63 @@ services:
         --crops-dir data/jersey-2023/test/crops
         --checkpoint outputs/best_model.pth
         --output outputs/predictions.json
-        --img-size 128
+        --img-size 224
         --batch-size 128
         --max-images 50
         --tta
+        --gt data/jersey-2023/test/test_gt.json
+    shm_size: "2gb"
+
+  # ── Temporal (Bi-LSTM) Training ────────────────────────────────────────────
+  train_temporal:
+    build:
+      context: .
+      dockerfile: DOCKERFILE
+    image: jersey-recognition:latest
+    volumes:
+      - ./data:/workspace/data
+      - ./outputs:/workspace/outputs
+      - ./src:/workspace/src
+    environment:
+      - OMP_NUM_THREADS=4
+      - MKL_NUM_THREADS=4
+      - PYTORCH_NO_CUDA_MEMORY_CACHING=1
+    command: >
+      python src/train_temporal.py
+        --data-dir data/jersey-2023
+        --crops-dir data/jersey-2023/train/crops
+        --seq-len 16
+        --img-size 224
+        --epochs 30
+        --batch-size 16
+        --lr 1e-3
+        --freeze-epochs 3
+        --patience 7
+        --workers 2
+        --output-dir outputs
+    shm_size: "2gb"
+
+  # ── Temporal (Bi-LSTM) Inference ───────────────────────────────────────────
+  predict_temporal:
+    build:
+      context: .
+      dockerfile: DOCKERFILE
+    image: jersey-recognition:latest
+    volumes:
+      - ./data:/workspace/data
+      - ./outputs:/workspace/outputs
+      - ./src:/workspace/src
+    environment:
+      - PYTORCH_NO_CUDA_MEMORY_CACHING=1
+    command: >
+      python src/predict_temporal.py
+        --data-dir data/jersey-2023
+        --crops-dir data/jersey-2023/test/crops
+        --checkpoint outputs/best_temporal.pth
+        --seq-len 16
+        --img-size 224
+        --batch-size 8
+        --output outputs/predictions_temporal.json
         --gt data/jersey-2023/test/test_gt.json
     shm_size: "2gb"
 

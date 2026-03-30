@@ -29,7 +29,7 @@ def parse_args():
     p.add_argument('--output', default='predictions.json')
     p.add_argument('--batch-size', type=int, default=64,
                    help='Images per batch within a tracklet')
-    p.add_argument('--img-size', type=int, default=128)
+    p.add_argument('--img-size', type=int, default=224)
     p.add_argument('--crops-dir', default=None,
                    help='Path to pre-computed torso crops (output of preprocess_crops.py). '
                         'If set, images are loaded from here instead of images/.')
