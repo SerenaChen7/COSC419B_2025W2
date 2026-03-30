@@ -65,6 +65,9 @@ def parse_args():
                    help='Epochs to train only the head before unfreezing the backbone')
     p.add_argument('--crops-dir', default=None,
                    help='Path to pre-computed torso crops (output of preprocess_crops.py)')
+    p.add_argument('--keyframes', action='store_true',
+                   help='Pre-filter each tracklet to high-quality frames (sharpness/contrast) '
+                        'before training. Reduces noise from blurry or dark images.')
     return p.parse_args()
 
 
@@ -164,12 +167,14 @@ def main():
         transform=get_train_transforms(args.img_size),
         max_per_tracklet=args.max_per_tracklet,
         crops_dir=args.crops_dir,
+        use_keyframes=args.keyframes,
     )
     val_ds = JerseyTrainDataset(
         train_images, train_gt,
         transform=get_val_transforms(args.img_size),
         max_per_tracklet=None,
         crops_dir=args.crops_dir,
+        use_keyframes=args.keyframes,
     )
 
     train_ds.tracklets = [train_ds.tracklets[i] for i in sorted(train_tracklet_idx)]
@@ -198,7 +203,7 @@ def main():
 
     optimizer = optim.AdamW(
         filter(lambda p: p.requires_grad, model.parameters()),
-        lr=args.lr, weight_decay=1e-4,
+        lr=args.lr, weight_decay=5e-4,
     )
     scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs, eta_min=1e-5)
 
@@ -217,7 +222,7 @@ def main():
             optimizer = optim.AdamW([
                 {'params': head_params, 'lr': args.lr},
                 {'params': backbone_params, 'lr': args.lr * 0.1},
-            ], weight_decay=1e-4)
+            ], weight_decay=5e-4)
             scheduler = optim.lr_scheduler.CosineAnnealingLR(
                 optimizer, T_max=args.epochs - args.freeze_epochs, eta_min=1e-5,
             )

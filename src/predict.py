@@ -20,6 +20,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 from dataset import JerseyTestDataset, get_val_transforms, class_to_jersey
 from model import load_checkpoint
+from consolidate import consolidate_tracklet
 
 
 def parse_args():
@@ -39,6 +40,9 @@ def parse_args():
                    help='Max frames to sample per tracklet. Evenly spaced to cover the full clip.')
     p.add_argument('--gt', default=None,
                    help='Path to ground truth JSON. If provided, prints accuracy after inference.')
+    p.add_argument('--keyframes', action='store_true',
+                   help='Use keyframe selection to pick high-quality frames per tracklet '
+                        'instead of evenly-spaced sampling.')
     return p.parse_args()
 
 
@@ -60,28 +64,38 @@ def get_tta_transforms(img_size):
 @torch.no_grad()
 def predict_tracklet(model, image_paths, transform, device, batch_size, tta_transforms=None):
     """
-    Run the model on all images in a tracklet and return aggregated class probabilities.
-    Images are processed in mini-batches to avoid OOM with large tracklets.
-    If tta_transforms is provided, predictions are averaged over all transforms.
+    Run the model on all images in a tracklet and return a jersey number prediction.
+
+    For each image, TTA probabilities are averaged first to get a per-image estimate.
+    Per-image predictions are then aggregated with confidence-weighted consolidation,
+    which down-weights 1-digit predictions when 2-digit predictions exist (handles
+    partial occlusion) and falls back to -1 when overall confidence is too low.
     """
     from PIL import Image
 
     all_transforms = [transform] + (tta_transforms or [])
-    all_probs = []
+    n_transforms = len(all_transforms)
+    frame_predictions = []  # (jersey_str, confidence) for each legible frame
 
     for i in range(0, len(image_paths), batch_size):
         batch_paths = image_paths[i:i + batch_size]
-        # Load each image once, then apply every transform to the same PIL image
         pil_images = [Image.open(p).convert('RGB') for p in batch_paths]
 
+        # Average softmax probabilities across all TTA passes per image
+        batch_probs = None
         for t in all_transforms:
             batch = torch.stack([t(img) for img in pil_images]).to(device)
-            logits = model(batch)
-            all_probs.append(F.softmax(logits, dim=1).cpu())
+            probs = F.softmax(model(batch), dim=1).cpu()
+            batch_probs = probs if batch_probs is None else batch_probs + probs
+        batch_probs = batch_probs / n_transforms
 
-    # Average over all frames and TTA passes, then pick best class
-    predicted_class = torch.cat(all_probs, dim=0).mean(dim=0).argmax().item()
-    return predicted_class
+        for probs in batch_probs:
+            pred_class = probs.argmax().item()
+            jersey_num = class_to_jersey(pred_class)
+            if jersey_num != -1:  # exclude illegible frames from consolidation
+                frame_predictions.append((str(jersey_num), probs[pred_class].item()))
+
+    return consolidate_tracklet(frame_predictions)
 
 
 def main():
@@ -102,19 +116,41 @@ def main():
     test_dataset = JerseyTestDataset(test_images_dir, transform=transform,
                                      crops_dir=args.crops_dir)
 
+    flags = []
+    if args.tta:
+        flags.append('TTA')
+    if args.keyframes:
+        flags.append('keyframes')
     print(f'Running inference on {len(test_dataset)} tracklets'
-          f'{" with TTA" if args.tta else ""}...')
+          f'{" with " + ", ".join(flags) if flags else ""}...')
+
+    if args.keyframes:
+        from keyframe_selection import select_keyframes
 
     predictions = {}
     for tracklet_id in tqdm(test_dataset.tracklet_ids):
-        image_paths = test_dataset.get_image_paths(tracklet_id)
-        if args.max_images and len(image_paths) > args.max_images:
-            # Evenly spaced sample so we cover the full clip, not just the start
-            indices = [int(i * len(image_paths) / args.max_images) for i in range(args.max_images)]
-            image_paths = [image_paths[i] for i in indices]
-        pred_class = predict_tracklet(model, image_paths, transform, device,
+        if args.keyframes:
+            tracklet_dir = os.path.join(test_images_dir, tracklet_id)
+            selected, _ = select_keyframes(tracklet_dir, stride=3, top_k=15)
+            if selected:
+                if args.crops_dir:
+                    image_paths = []
+                    for p in selected:
+                        crop = os.path.join(args.crops_dir, tracklet_id, p.name)
+                        image_paths.append(crop if os.path.exists(crop) else str(p))
+                else:
+                    image_paths = [str(p) for p in selected]
+            else:
+                image_paths = test_dataset.get_image_paths(tracklet_id)
+        else:
+            image_paths = test_dataset.get_image_paths(tracklet_id)
+            if args.max_images and len(image_paths) > args.max_images:
+                # Evenly spaced sample so we cover the full clip, not just the start
+                indices = [int(i * len(image_paths) / args.max_images) for i in range(args.max_images)]
+                image_paths = [image_paths[i] for i in indices]
+
+        jersey_num = predict_tracklet(model, image_paths, transform, device,
                                       args.batch_size, tta_transforms)
-        jersey_num = class_to_jersey(pred_class)
         predictions[tracklet_id] = jersey_num
 
     with open(args.output, 'w') as f:

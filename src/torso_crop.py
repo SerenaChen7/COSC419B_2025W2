@@ -58,6 +58,12 @@ def _ensure_model() -> str:
 # Higher → better detection on the tiny player crops in this dataset.
 UPSCALE_MIN_HEIGHT = 320
 
+# After upscaling, cap width at this value.  A landscape crop upscaled to
+# 320 px tall can become 640+ px wide — a large numpy array that MediaPipe
+# immediately downscales internally anyway.  Capping saves array creation and
+# data-copy time with no effect on detection quality.
+MAX_INPUT_WIDTH = 480
+
 # Padding around the shoulder-to-hip box as a fraction of torso height.
 TORSO_TOP_PAD = 0.10   # above shoulders (keep head/collar area)
 TORSO_BOT_PAD = 0.05   # below hips  (reduced – avoids pulling in legs)
@@ -131,6 +137,15 @@ class TorsoCropper:
             )
         else:
             upscaled = img
+
+        # Cap width after upscaling — wide crops create oversized numpy arrays
+        # that MediaPipe resizes internally anyway.
+        if upscaled.width > MAX_INPUT_WIDTH:
+            cap_scale = MAX_INPUT_WIDTH / upscaled.width
+            upscaled  = upscaled.resize(
+                (MAX_INPUT_WIDTH, max(1, round(upscaled.height * cap_scale))),
+                Image.BICUBIC,
+            )
 
         rgb_array = np.array(upscaled, dtype=np.uint8)
         mp_image  = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb_array)

@@ -254,7 +254,7 @@ def _process_one(task):
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _collect_tasks(images_root, crops_root):
+def _collect_tasks(images_root, crops_root, stride=1):
     tasks = []
     if not os.path.isdir(images_root):
         return tasks
@@ -262,15 +262,17 @@ def _collect_tasks(images_root, crops_root):
         tracklet_dir = os.path.join(images_root, tracklet_id)
         if not os.path.isdir(tracklet_dir):
             continue
-        for fname in os.listdir(tracklet_dir):
-            if fname.lower().endswith('.jpg'):
-                src = os.path.join(tracklet_dir, fname)
-                dst = os.path.join(crops_root, tracklet_id, fname)
-                tasks.append((src, dst))
+        fnames = sorted(
+            f for f in os.listdir(tracklet_dir) if f.lower().endswith('.jpg')
+        )
+        for fname in fnames[::stride]:
+            src = os.path.join(tracklet_dir, fname)
+            dst = os.path.join(crops_root, tracklet_id, fname)
+            tasks.append((src, dst))
     return tasks
 
 
-def process_split(split, data_dir, overwrite, n_workers, dry_run):
+def process_split(split, data_dir, overwrite, n_workers, dry_run, stride=1):
     images_root = os.path.join(data_dir, split, 'images')
     crops_root  = os.path.join(data_dir, split, 'crops')
 
@@ -278,12 +280,13 @@ def process_split(split, data_dir, overwrite, n_workers, dry_run):
         print(f'[{split}] images dir not found: {images_root} -- skipping.')
         return
 
-    tasks_raw = _collect_tasks(images_root, crops_root)
+    tasks_raw = _collect_tasks(images_root, crops_root, stride=stride)
     tasks     = [(s, d, overwrite) for s, d in tasks_raw]
 
     n_tracklets = len({os.path.dirname(s) for s, d in tasks_raw})
     total       = len(tasks)
-    print(f'[{split}] {total} images across {n_tracklets} tracklets')
+    stride_note = f' (every {stride} frames)' if stride > 1 else ''
+    print(f'[{split}] {total} images across {n_tracklets} tracklets{stride_note}')
     print(f'[{split}] Saving crops to: {crops_root}')
     print(f'[{split}] Workers: {n_workers}')
 
@@ -352,6 +355,10 @@ def parse_args():
                    help='Re-process images that already exist in crops/')
     p.add_argument('--dry-run',   action='store_true',
                    help='Count work without writing any files.')
+    p.add_argument('--stride',    type=int, default=1,
+                   help='Process every Nth frame per tracklet (default: 1 = all frames). '
+                        'Use --stride 3 to match keyframe_selection stride and cut '
+                        'preprocessing time by ~3×. Missing crops fall back to originals.')
     return p.parse_args()
 
 
@@ -360,7 +367,8 @@ def main():
     splits = ['train', 'test'] if args.split == 'all' else [args.split]
 
     for split in splits:
-        process_split(split, args.data_dir, args.overwrite, args.workers, args.dry_run)
+        process_split(split, args.data_dir, args.overwrite, args.workers, args.dry_run,
+                      stride=args.stride)
 
     print('\nPreprocessing complete.')
     print('Use --crops-dir data/jersey-2023/<split>/crops when running train.py / predict.py.')
