@@ -24,22 +24,19 @@ def class_to_jersey(class_idx: int) -> int:
     return -1 if class_idx == 0 else class_idx
 
 
-def get_train_transforms(img_size: int = 128):
+def get_train_transforms(img_size: int = 224):
     return T.Compose([
         T.Resize((img_size, img_size)),
-        T.RandomGrayscale(p=0.3),
-        T.ColorJitter(brightness=0.5, contrast=0.5, saturation=0.4, hue=0.05),
-        T.RandomAffine(degrees=15, translate=(0.1, 0.1), scale=(0.8, 1.2)),
-        T.RandomPerspective(distortion_scale=0.2, p=0.4),
-        T.GaussianBlur(kernel_size=3, sigma=(0.1, 1.0)),
+        T.RandomGrayscale(p=0.2),
+        T.ColorJitter(brightness=0.4, contrast=0.4, saturation=0.3, hue=0.1),
+        T.RandomAffine(degrees=10, translate=(0.05, 0.05), scale=(0.9, 1.1)),
         T.ToTensor(),
         T.Normalize(mean=[0.485, 0.456, 0.406],
                     std=[0.229, 0.224, 0.225]),
-        T.RandomErasing(p=0.2, scale=(0.02, 0.08)),
     ])
 
 
-def get_val_transforms(img_size: int = 128):
+def get_val_transforms(img_size: int = 224):
     return T.Compose([
         T.Resize((img_size, img_size)),
         T.ToTensor(),

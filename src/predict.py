@@ -26,7 +26,7 @@ from tqdm import tqdm
 
 sys.path.insert(0, str(Path(__file__).parent))
 
-from dataset import get_val_transforms, class_to_jersey
+from dataset import get_val_transforms
 from model import load_checkpoint
 from keyframe_selection import select_keyframes
 from consolidate import consolidate_tracklet
@@ -37,7 +37,7 @@ def parse_args():
     p.add_argument('--data-dir',   default='data/jersey-2023')
     p.add_argument('--checkpoint', default='outputs/best_model.pth')
     p.add_argument('--output',     default='outputs/predictions.json')
-    p.add_argument('--img-size',   type=int, default=128)
+    p.add_argument('--img-size',   type=int, default=224)
     p.add_argument('--batch-size', type=int, default=64)
     p.add_argument('--keyframes',  action='store_true',
                    help='Use keyframe selection to pick best frames per tracklet.')
@@ -51,10 +51,10 @@ def parse_args():
 @torch.no_grad()
 def predict_tracklet(model, image_paths, transform, device, batch_size):
     """
-    Run the classifier on all frames and return per-frame (jersey_str, confidence)
-    pairs for legible predictions, ready for consolidation.
+    Run the classifier on all frames and return the full per-frame softmax
+    probability vectors, ready for Bayesian log-prob consolidation.
     """
-    frame_predictions = []
+    frame_probs_list = []
 
     for i in range(0, len(image_paths), batch_size):
         batch_paths = image_paths[i:i + batch_size]
@@ -62,15 +62,11 @@ def predict_tracklet(model, image_paths, transform, device, batch_size):
             transform(Image.open(p).convert('RGB')) for p in batch_paths
         ]).to(device, non_blocking=True)
 
-        probs = F.softmax(model(imgs).float(), dim=1).cpu()
-
+        probs = F.softmax(model(imgs).float(), dim=1).cpu().numpy()
         for frame_probs in probs:
-            pred_class = frame_probs.argmax().item()
-            jersey_num = class_to_jersey(pred_class)
-            if jersey_num != -1:
-                frame_predictions.append((str(jersey_num), frame_probs[pred_class].item()))
+            frame_probs_list.append(frame_probs)
 
-    return frame_predictions
+    return frame_probs_list
 
 
 def main():
@@ -120,8 +116,8 @@ def main():
             predictions[tid] = -1
             continue
 
-        frame_preds = predict_tracklet(model, image_paths, transform, device, args.batch_size)
-        predictions[tid] = consolidate_tracklet(frame_preds)
+        frame_probs = predict_tracklet(model, image_paths, transform, device, args.batch_size)
+        predictions[tid] = consolidate_tracklet(frame_probs)
 
     os.makedirs(os.path.dirname(os.path.abspath(args.output)), exist_ok=True)
     with open(args.output, 'w') as f:

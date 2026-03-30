@@ -30,7 +30,7 @@ from PIL import Image
 
 sys.path.insert(0, str(Path(__file__).parent))
 
-from dataset import JerseyTrainDataset, NUM_CLASSES, get_train_transforms, get_val_transforms, class_to_jersey
+from dataset import JerseyTrainDataset, NUM_CLASSES, get_train_transforms, get_val_transforms
 from model import build_model, freeze_backbone, unfreeze_backbone, _is_head_param
 from consolidate import consolidate_tracklet
 
@@ -38,13 +38,13 @@ from consolidate import consolidate_tracklet
 def parse_args():
     p = argparse.ArgumentParser()
     p.add_argument('--data-dir',         default='data/jersey-2023')
-    p.add_argument('--arch',             default='resnet18',
-                   choices=['mobilenet_v3_small', 'mobilenet_v3_large', 'resnet18'])
-    p.add_argument('--epochs',           type=int,   default=15)
+    p.add_argument('--arch',             default='resnet34',
+                   choices=['mobilenet_v3_small', 'mobilenet_v3_large', 'resnet18', 'resnet34'])
+    p.add_argument('--epochs',           type=int,   default=20)
     p.add_argument('--batch-size',       type=int,   default=32)
     p.add_argument('--lr',               type=float, default=1e-3)
-    p.add_argument('--img-size',         type=int,   default=128)
-    p.add_argument('--max-per-tracklet', type=int,   default=25)
+    p.add_argument('--img-size',         type=int,   default=224)
+    p.add_argument('--max-per-tracklet', type=int,   default=20)
     p.add_argument('--max-tracklets',    type=int,   default=None)
     p.add_argument('--val-split',        type=float, default=0.1)
     p.add_argument('--label-smoothing',  type=float, default=0.1)
@@ -98,27 +98,24 @@ def val_epoch(model, loader, criterion, device):
 def val_tracklet_accuracy(model, val_ds, transform, device, batch_size):
     """
     Per-tracklet consolidation accuracy — identical logic to predict.py.
-    This is the metric that actually correlates with test performance.
+    Uses Bayesian log-prob aggregation (full softmax vectors, not just argmax).
     """
     model.eval()
     correct = 0
 
     for imgs_paths, jersey_num in tqdm(val_ds.tracklets, desc='Val  ', leave=False):
-        frame_preds = []
+        frame_probs_list = []
         for i in range(0, len(imgs_paths), batch_size):
             batch = imgs_paths[i:i + batch_size]
             tensors = torch.stack([
                 transform(Image.open(p).convert('RGB')) for p in batch
             ]).to(device, non_blocking=True)
 
-            probs = F.softmax(model(tensors).float(), dim=1).cpu()
+            probs = F.softmax(model(tensors).float(), dim=1).cpu().numpy()
             for frame_probs in probs:
-                pred_class = frame_probs.argmax().item()
-                jersey     = class_to_jersey(pred_class)
-                if jersey != -1:
-                    frame_preds.append((str(jersey), frame_probs[pred_class].item()))
+                frame_probs_list.append(frame_probs)
 
-        predicted = consolidate_tracklet(frame_preds)
+        predicted = consolidate_tracklet(frame_probs_list)
         if predicted == jersey_num:
             correct += 1
 

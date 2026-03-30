@@ -2,7 +2,8 @@
 Jersey number classifier.
 
 Supported architectures (--arch):
-    resnet18             default; best accuracy for jersey digit recognition
+    resnet34             default; best accuracy for jersey digit recognition
+    resnet18             lighter alternative
     mobilenet_v3_small   fastest on CPU
     mobilenet_v3_large   better accuracy than small, moderately slower
 """
@@ -15,7 +16,7 @@ NUM_CLASSES = 100  # class 0 = illegible, class 1-99 = jersey number
 
 def build_model(num_classes: int = NUM_CLASSES,
                 pretrained: bool = True,
-                arch: str = 'resnet18') -> nn.Module:
+                arch: str = 'resnet34') -> nn.Module:
     """Return a pretrained backbone with a replaced classification head."""
 
     if arch == 'mobilenet_v3_small':
@@ -38,13 +39,25 @@ def build_model(num_classes: int = NUM_CLASSES,
             nn.Linear(in_features, 256),
             nn.BatchNorm1d(256),
             nn.ReLU(inplace=True),
-            nn.Dropout(p=0.5),
+            nn.Dropout(p=0.4),
+            nn.Linear(256, num_classes),
+        )
+
+    elif arch == 'resnet34':
+        weights = models.ResNet34_Weights.DEFAULT if pretrained else None
+        model = models.resnet34(weights=weights)
+        in_features = model.fc.in_features  # 512
+        model.fc = nn.Sequential(
+            nn.Linear(in_features, 256),
+            nn.BatchNorm1d(256),
+            nn.ReLU(inplace=True),
+            nn.Dropout(p=0.4),
             nn.Linear(256, num_classes),
         )
 
     else:
         raise ValueError(
-            f"Unknown arch '{arch}'. Choose: resnet18, mobilenet_v3_small, mobilenet_v3_large"
+            f"Unknown arch '{arch}'. Choose: resnet34, resnet18, mobilenet_v3_small, mobilenet_v3_large"
         )
 
     return model
@@ -52,6 +65,8 @@ def build_model(num_classes: int = NUM_CLASSES,
 
 def _is_head_param(name: str) -> bool:
     return name.startswith('fc.') or name.startswith('classifier.')
+
+
 
 
 def freeze_backbone(model: nn.Module):
