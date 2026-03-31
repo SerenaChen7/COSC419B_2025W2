@@ -42,7 +42,11 @@ def parse_args():
                    help='Ground-truth JSON for on-the-fly evaluation')
     p.add_argument('--tta-passes', type=int, default=1,
                    help='MC Dropout TTA: run model N times with dropout enabled and average '
-                        'logits (1 = no TTA; 5 recommended after training with dropout >= 0.4)')
+                        'logits (1 = no TTA; recommended: 10-30 passes for stable averaging)')
+    p.add_argument('--mc-dropout-rate', type=float, default=None,
+                   help='Override dropout probability used during MC Dropout TTA. '
+                        'Use a lower value than training rate (e.g. 0.1) to reduce per-pass '
+                        'noise. Default: use training dropout rate from checkpoint.')
     return p.parse_args()
 
 
@@ -87,7 +91,14 @@ def main():
 
     use_tta = args.tta_passes > 1
     if use_tta:
-        model.train()   # enable dropout stochasticity for MC Dropout
+        # Only the final dropout (before heads) is made stochastic.
+        # feat_dropout is intentionally kept disabled: applying MC Dropout on
+        # LSTM inputs corrupts sequential representations across all frames and
+        # compounds noise, hurting accuracy. BN stays in eval mode so running
+        # statistics are used rather than noisy batch statistics.
+        model.enable_mc_dropout(rate=args.mc_dropout_rate)
+        eff_rate = args.mc_dropout_rate if args.mc_dropout_rate is not None else 'training rate'
+        print(f'MC Dropout TTA: {args.tta_passes} passes, dropout rate={eff_rate} (heads only)')
     else:
         model.eval()
 
