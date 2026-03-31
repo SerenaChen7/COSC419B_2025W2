@@ -16,25 +16,7 @@ NUM_DIGIT_CLASSES = 11   # 0-9 + blank
 
 SPATIAL_FEAT_DIM  = 512  # ResNet-18 penultimate layer output
 LSTM_HIDDEN       = 128  # per direction; total output dim = 256
-LSTM_LAYERS       = 2    # inter-layer LSTM dropout activates when > 1
-
-
-class AttentionPool(nn.Module):
-    """
-    Single-head additive attention over the time axis.
-    Learns a context vector: score_t = w^T tanh(h_t), weight_t = softmax(scores).
-    Output is the weighted sum of LSTM hidden states — emphasises informative frames.
-    """
-
-    def __init__(self, hidden_dim: int):
-        super().__init__()
-        self.attn = nn.Linear(hidden_dim, 1, bias=False)
-
-    def forward(self, lstm_out: torch.Tensor) -> torch.Tensor:
-        # lstm_out: (B, T, hidden_dim)
-        scores  = self.attn(torch.tanh(lstm_out))      # (B, T, 1)
-        weights = torch.softmax(scores, dim=1)          # (B, T, 1)
-        return (weights * lstm_out).sum(dim=1)          # (B, hidden_dim)
+LSTM_LAYERS       = 1
 
 
 class SpatialEncoder(nn.Module):
@@ -63,20 +45,17 @@ class SpatioTemporalNetwork(nn.Module):
       4. Two linear heads predict the tens and units digits separately
     """
 
-    def __init__(self, pretrained: bool = True, dropout: float = 0.0,
-                 lstm_layers: int = LSTM_LAYERS):
+    def __init__(self, pretrained: bool = True, dropout: float = 0.0):
         super().__init__()
         self.encoder = SpatialEncoder(pretrained=pretrained)
-        self.feat_dropout = nn.Dropout(p=dropout)   # applied to encoder output before LSTM
         self.bilstm = nn.LSTM(
             input_size=SPATIAL_FEAT_DIM,
             hidden_size=LSTM_HIDDEN,
-            num_layers=lstm_layers,
+            num_layers=LSTM_LAYERS,
             batch_first=True,
             bidirectional=True,
-            dropout=dropout if lstm_layers > 1 else 0.0,
+            dropout=dropout if LSTM_LAYERS > 1 else 0.0,
         )
-        self.attn_pool = AttentionPool(LSTM_HIDDEN * 2)
         self.dropout = nn.Dropout(p=dropout)
         temporal_dim = LSTM_HIDDEN * 2   # 256
         self.head_d1 = nn.Linear(temporal_dim, NUM_DIGIT_CLASSES)
@@ -86,9 +65,8 @@ class SpatioTemporalNetwork(nn.Module):
         B, T, C, H, W = x.shape
         feats = self.encoder(x.view(B * T, C, H, W))   # (B*T, 512)
         feats = feats.view(B, T, -1)                    # (B, T, 512)
-        feats = self.feat_dropout(feats)                # dropout before LSTM
         lstm_out, _ = self.bilstm(feats)                # (B, T, 256)
-        temporal = self.attn_pool(lstm_out)             # (B, 256) — attention over frames
+        temporal = lstm_out.mean(dim=1)                 # (B, 256)
         temporal = self.dropout(temporal)               # dropout before heads
         return self.head_d1(temporal), self.head_d2(temporal)
 
@@ -146,18 +124,9 @@ def save_checkpoint(path: str, model: nn.Module, optimizer, epoch: int,
 
 
 def load_checkpoint(path: str, device: torch.device) -> 'SpatioTemporalNetwork':
-    state = torch.load(path, map_location=device, weights_only=False)
+    state = torch.load(path, map_location=device)
     saved_args = state.get('args', {})
-    dropout     = saved_args.get('dropout',     0.0)
-    lstm_layers = saved_args.get('lstm_layers', LSTM_LAYERS)
-    model = SpatioTemporalNetwork(pretrained=False, dropout=dropout,
-                                  lstm_layers=lstm_layers)
-    # strict=False so that old checkpoints (without attn_pool) load gracefully
-    missing, unexpected = model.load_state_dict(
-        state['model_state_dict'], strict=False
-    )
-    if missing:
-        print(f'[load_checkpoint] Initialised from scratch: {missing}')
-    if unexpected:
-        print(f'[load_checkpoint] Ignored unexpected keys: {unexpected}')
+    dropout = saved_args.get('dropout', 0.0)
+    model = SpatioTemporalNetwork(pretrained=False, dropout=dropout)
+    model.load_state_dict(state['model_state_dict'])
     return model
