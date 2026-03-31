@@ -40,6 +40,9 @@ def parse_args():
     p.add_argument('--output',     default='predictions_temporal.json')
     p.add_argument('--gt',         default=None,
                    help='Ground-truth JSON for on-the-fly evaluation')
+    p.add_argument('--tta-passes', type=int, default=1,
+                   help='MC Dropout TTA: run model N times with dropout enabled and average '
+                        'logits (1 = no TTA; 5 recommended after training with dropout >= 0.4)')
     return p.parse_args()
 
 
@@ -54,8 +57,9 @@ def main():
 
     model = load_checkpoint(args.checkpoint, device)
     model.to(device)
-    model.eval()
     print(f'Loaded checkpoint: {args.checkpoint}')
+    if args.tta_passes > 1:
+        print(f'MC Dropout TTA enabled: {args.tta_passes} passes')
 
     test_images_dir = os.path.join(args.data_dir, 'test', 'images')
     transform = get_seq_val_transforms(args.img_size)
@@ -81,10 +85,25 @@ def main():
 
     predictions = {}
 
+    use_tta = args.tta_passes > 1
+    if use_tta:
+        model.train()   # enable dropout stochasticity for MC Dropout
+    else:
+        model.eval()
+
     with torch.no_grad():
         for frames_batch, tracklet_ids in tqdm(loader):
             frames_batch = frames_batch.to(device)   # (B, T, 3, H, W)
-            logits_d1, logits_d2 = model(frames_batch)
+            if use_tta:
+                logits_d1_list, logits_d2_list = [], []
+                for _ in range(args.tta_passes):
+                    ld1, ld2 = model(frames_batch)
+                    logits_d1_list.append(ld1)
+                    logits_d2_list.append(ld2)
+                logits_d1 = torch.stack(logits_d1_list).mean(0)
+                logits_d2 = torch.stack(logits_d2_list).mean(0)
+            else:
+                logits_d1, logits_d2 = model(frames_batch)
             pred_d1 = logits_d1.argmax(dim=1).cpu().tolist()
             pred_d2 = logits_d2.argmax(dim=1).cpu().tolist()
             for tid, d1, d2 in zip(tracklet_ids, pred_d1, pred_d2):
