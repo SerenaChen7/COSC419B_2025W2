@@ -82,6 +82,39 @@ class SpatioTemporalNetwork(nn.Module):
         self.head_d1 = nn.Linear(temporal_dim, NUM_DIGIT_CLASSES)
         self.head_d2 = nn.Linear(temporal_dim, NUM_DIGIT_CLASSES)
 
+    def enable_mc_dropout(self, rate: float | None = None,
+                          include_feat_dropout: bool = False) -> None:
+        """
+        Prepare the model for MC Dropout test-time augmentation.
+
+        Sets the model to eval mode (so BatchNorm uses its running statistics,
+        not batch statistics) while keeping selected Dropout layers in training
+        mode so they sample stochastically across TTA passes.
+
+        By default only the final dropout (before the digit heads) is made
+        stochastic.  Enabling feat_dropout too is NOT recommended: it
+        corrupts LSTM inputs across all frames, compounding noise over the
+        sequence and drastically hurting accuracy.
+
+        Parameters
+        ----------
+        rate : float, optional
+            If given, overrides the Dropout probability for the enabled
+            layers.  Use a value lower than the training rate (e.g. 0.1)
+            to reduce per-pass noise when averaging few passes.
+        include_feat_dropout : bool
+            If True, also enables the feature dropout applied before the
+            LSTM.  Default False — keeps LSTM inputs clean.
+        """
+        self.eval()
+        targets = [self.dropout]  # final dropout before heads (always)
+        if include_feat_dropout:
+            targets.append(self.feat_dropout)
+        for m in targets:
+            m.train()
+            if rate is not None:
+                m.p = rate
+
     def forward(self, x: torch.Tensor):
         B, T, C, H, W = x.shape
         feats = self.encoder(x.view(B * T, C, H, W))   # (B*T, 512)
