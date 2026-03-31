@@ -68,7 +68,47 @@ def parse_args():
     p.add_argument('--keyframes', action='store_true',
                    help='Pre-filter each tracklet to high-quality frames (sharpness/contrast) '
                         'before training. Reduces noise from blurry or dark images.')
+    p.add_argument('--focal-loss', action='store_true',
+                   help='Use Focal Loss (gamma=2) instead of CrossEntropyLoss. '
+                        'Down-weights easy examples and focuses training on hard / rare classes.')
+    p.add_argument('--focal-gamma', type=float, default=2.0,
+                   help='Focusing parameter for Focal Loss (default: 2.0). '
+                        'Higher values increase focus on hard examples. Only used with --focal-loss.')
     return p.parse_args()
+
+
+class FocalLoss(nn.Module):
+    """
+    Focal Loss (Lin et al., 2017) with optional class weights and label smoothing.
+
+    FL(p_t) = -alpha_t * (1 - p_t)^gamma * log(p_t)
+
+    Cross-entropy is a special case at gamma=0.  Higher gamma values increase
+    the relative weight on hard, misclassified examples and suppress the
+    contribution of easy, well-classified ones.  Particularly useful here
+    because many jersey numbers (rare classes) are hard to recognise.
+
+    Parameters
+    ----------
+    gamma : float
+        Focusing exponent.  gamma=0 reduces to weighted cross-entropy.
+    weight : Tensor, optional
+        Per-class weights (same semantics as nn.CrossEntropyLoss).
+    label_smoothing : float
+        Applied to the soft cross-entropy before the focal modulation.
+    """
+
+    def __init__(self, gamma: float = 2.0, weight=None, label_smoothing: float = 0.0):
+        super().__init__()
+        self.gamma = gamma
+        self.ce = nn.CrossEntropyLoss(weight=weight, reduction='none',
+                                      label_smoothing=label_smoothing)
+
+    def forward(self, logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+        ce_loss = self.ce(logits, targets)            # (N,)
+        pt = torch.exp(-ce_loss)                      # probability of correct class
+        focal_weight = (1.0 - pt) ** self.gamma
+        return (focal_weight * ce_loss).mean()
 
 
 def accuracy(logits: torch.Tensor, targets: torch.Tensor) -> float:
@@ -199,7 +239,12 @@ def main():
         class_weights[cls] = (total_samples / (NUM_CLASSES * count)) ** 0.5
     class_weights = class_weights.to(device)
 
-    criterion = nn.CrossEntropyLoss(weight=class_weights, label_smoothing=args.label_smoothing)
+    if args.focal_loss:
+        criterion = FocalLoss(gamma=args.focal_gamma, weight=class_weights,
+                              label_smoothing=args.label_smoothing)
+        print(f'Using FocalLoss (gamma={args.focal_gamma}, label_smoothing={args.label_smoothing})')
+    else:
+        criterion = nn.CrossEntropyLoss(weight=class_weights, label_smoothing=args.label_smoothing)
 
     optimizer = optim.AdamW(
         filter(lambda p: p.requires_grad, model.parameters()),
