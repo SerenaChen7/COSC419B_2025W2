@@ -43,6 +43,13 @@ def parse_args():
     p.add_argument('--keyframes', action='store_true',
                    help='Use keyframe selection to pick high-quality frames per tracklet '
                         'instead of evenly-spaced sampling.')
+    p.add_argument('--min-frame-conf', type=float, default=0.35,
+                   help='Per-frame softmax-max threshold: frames below this are excluded from '
+                        'voting. Set to 0.0 to disable. (default: 0.35)')
+    p.add_argument('--max-frame-entropy', type=float, default=3.0,
+                   help='Per-frame Shannon entropy threshold (nats): frames above this are '
+                        'excluded from voting. Uniform over 100 classes ≈ 4.605 nats. '
+                        'Set to 0.0 to disable. (default: 3.0)')
     return p.parse_args()
 
 
@@ -62,15 +69,23 @@ def get_tta_transforms(img_size):
 
 
 @torch.no_grad()
-def predict_tracklet(model, image_paths, transform, device, batch_size, tta_transforms=None):
+def predict_tracklet(model, image_paths, transform, device, batch_size,
+                     tta_transforms=None, min_frame_conf=0.35, max_frame_entropy=3.0):
     """
     Run the model on all images in a tracklet and return a jersey number prediction.
 
     For each image, TTA probabilities are averaged first to get a per-image estimate.
-    Per-image predictions are then aggregated with confidence-weighted consolidation,
-    which down-weights 1-digit predictions when 2-digit predictions exist (handles
-    partial occlusion) and falls back to -1 when overall confidence is too low.
+    Frames are then filtered by confidence and entropy before voting:
+    - min_frame_conf: drop frames whose softmax-max is below this threshold
+      (the model is not confident enough about any single class).
+    - max_frame_entropy: drop frames whose Shannon entropy exceeds this threshold
+      (the model's probability mass is too spread across many classes).
+    Remaining per-image predictions are aggregated with confidence-weighted
+    consolidation, which down-weights 1-digit predictions when 2-digit predictions
+    exist (handles partial occlusion) and falls back to -1 when overall confidence
+    is too low.
     """
+    import math
     from PIL import Image
 
     all_transforms = [transform] + (tta_transforms or [])
@@ -92,8 +107,19 @@ def predict_tracklet(model, image_paths, transform, device, batch_size, tta_tran
         for probs in batch_probs:
             pred_class = probs.argmax().item()
             jersey_num = class_to_jersey(pred_class)
-            if jersey_num != -1:  # exclude illegible frames from consolidation
-                frame_predictions.append((str(jersey_num), probs[pred_class].item()))
+            if jersey_num == -1:  # model predicted illegible — skip
+                continue
+            conf = probs[pred_class].item()
+            # Confidence gate: drop low-confidence frames
+            if min_frame_conf > 0 and conf < min_frame_conf:
+                continue
+            # Entropy gate: drop frames where probability mass is too spread out.
+            # H(p) for uniform over 100 classes ≈ 4.605 nats; lower = more certain.
+            if max_frame_entropy > 0:
+                entropy = -(probs * probs.clamp(min=1e-9).log()).sum().item()
+                if entropy > max_frame_entropy:
+                    continue
+            frame_predictions.append((str(jersey_num), conf))
 
     return consolidate_tracklet(frame_predictions)
 
@@ -150,7 +176,9 @@ def main():
                 image_paths = [image_paths[i] for i in indices]
 
         jersey_num = predict_tracklet(model, image_paths, transform, device,
-                                      args.batch_size, tta_transforms)
+                                      args.batch_size, tta_transforms,
+                                      min_frame_conf=args.min_frame_conf,
+                                      max_frame_entropy=args.max_frame_entropy)
         predictions[tracklet_id] = jersey_num
 
     with open(args.output, 'w') as f:
