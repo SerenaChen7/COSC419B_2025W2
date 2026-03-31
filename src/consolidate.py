@@ -36,12 +36,24 @@ from collections import defaultdict
 # Tunable constants (match paper's best-performing configuration)
 # ---------------------------------------------------------------------------
 
-# If total confidence across all frames is below this, output -1.
-CONFIDENCE_THRESHOLD = 2.0
+# Minimum mean per-frame confidence required to make a prediction.
+# Mean (rather than sum) is scale-invariant to tracklet length, so a long
+# tracklet of weakly-confident frames does not trivially pass the gate.
+MEAN_CONFIDENCE_THRESHOLD = 0.45
+
+# Minimum number of valid (post-filter) frames required to make a prediction.
+# Protects against tracklets where almost every frame was filtered by the
+# entropy/confidence gates in predict.py, leaving only 1-2 noisy votes.
+MIN_VOTES = 3
 
 # When 1-digit and 2-digit predictions coexist in a tracklet, multiply
 # 1-digit confidences by this factor before voting.
 ONE_DIGIT_DOWN_WEIGHT = 0.5
+
+# Minimum number of two-digit predictions required before we start down-
+# weighting single-digit predictions.  A single noisy two-digit frame (e.g.
+# background text misread as "34") should not suppress genuine #3 or #4 votes.
+MIN_TWO_DIGIT_VOTES = 3
 
 
 def _is_valid_jersey(text: str) -> bool:
@@ -54,8 +66,10 @@ def _is_valid_jersey(text: str) -> bool:
 
 def consolidate_tracklet(
     frame_predictions: list[tuple[str, float]],
-    confidence_threshold: float = CONFIDENCE_THRESHOLD,
+    mean_confidence_threshold: float = MEAN_CONFIDENCE_THRESHOLD,
     one_digit_down_weight: float = ONE_DIGIT_DOWN_WEIGHT,
+    min_votes: int = MIN_VOTES,
+    min_two_digit_votes: int = MIN_TWO_DIGIT_VOTES,
 ) -> int:
     """
     Aggregate frame-level STR predictions into a single tracklet prediction.
@@ -69,14 +83,27 @@ def consolidate_tracklet(
         Frames where the legibility classifier returned illegible should
         be excluded before calling this function.
 
-    confidence_threshold : float
-        Minimum total confidence required to make a prediction.
-        If the sum of all confidences is below this, returns -1.
+    mean_confidence_threshold : float
+        Minimum *mean* per-frame confidence required to make a prediction.
+        Using the mean (rather than the sum) makes the threshold scale-
+        invariant to tracklet length: a long tracklet of weakly-confident
+        frames cannot trivially pass the gate.  Returns -1 if below threshold.
 
     one_digit_down_weight : float
         Multiplier applied to 1-digit prediction confidences when the
-        tracklet also contains at least one 2-digit prediction.
-        Reduces the impact of partial-occlusion misreads (e.g. "34" -> "3").
+        tracklet also contains enough 2-digit predictions (see
+        min_two_digit_votes).  Reduces the impact of partial-occlusion
+        misreads (e.g. "34" -> "3").
+
+    min_votes : int
+        Minimum number of valid frames required after filtering.  If fewer
+        frames survive, the tracklet is too uncertain to predict and -1 is
+        returned.
+
+    min_two_digit_votes : int
+        How many 2-digit predictions must be present before we start
+        down-weighting single-digit votes.  Prevents a single noisy two-
+        digit frame from suppressing genuine single-digit jersey numbers.
 
     Returns
     -------
@@ -94,19 +121,26 @@ def consolidate_tracklet(
     if not valid:
         return -1
 
-    # Check total confidence against threshold
-    total_confidence = sum(conf for _, conf in valid)
-    if total_confidence < confidence_threshold:
+    # Require a minimum number of contributing frames
+    if len(valid) < min_votes:
         return -1
 
-    # Determine if any 2-digit predictions exist in this tracklet
-    has_two_digit = any(len(num) == 2 for num, _ in valid)
+    # Check mean per-frame confidence against threshold
+    total_confidence = sum(conf for _, conf in valid)
+    mean_confidence = total_confidence / len(valid)
+    if mean_confidence < mean_confidence_threshold:
+        return -1
+
+    # Only down-weight single-digit votes when enough two-digit predictions
+    # exist to be confident that the jersey number is genuinely two digits.
+    two_digit_count = sum(1 for num, _ in valid if len(num) == 2)
+    has_confident_two_digit = two_digit_count >= min_two_digit_votes
 
     # Accumulate confidence-weighted votes
     votes: dict[int, float] = defaultdict(float)
     for num_str, conf in valid:
         jersey_num = int(num_str)
-        if has_two_digit and len(num_str) == 1:
+        if has_confident_two_digit and len(num_str) == 1:
             conf *= one_digit_down_weight
         votes[jersey_num] += conf
 
@@ -115,8 +149,10 @@ def consolidate_tracklet(
 
 def consolidate_all(
     tracklet_predictions: dict[str, list[tuple[str, float]]],
-    confidence_threshold: float = CONFIDENCE_THRESHOLD,
+    mean_confidence_threshold: float = MEAN_CONFIDENCE_THRESHOLD,
     one_digit_down_weight: float = ONE_DIGIT_DOWN_WEIGHT,
+    min_votes: int = MIN_VOTES,
+    min_two_digit_votes: int = MIN_TWO_DIGIT_VOTES,
 ) -> dict[str, int]:
     """
     Consolidate predictions for an entire dataset split.
@@ -132,6 +168,9 @@ def consolidate_all(
         Maps tracklet_id -> jersey number int (1-99) or -1.
     """
     return {
-        tid: consolidate_tracklet(preds, confidence_threshold, one_digit_down_weight)
+        tid: consolidate_tracklet(
+            preds, mean_confidence_threshold, one_digit_down_weight,
+            min_votes, min_two_digit_votes,
+        )
         for tid, preds in tracklet_predictions.items()
     }
